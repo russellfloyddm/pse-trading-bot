@@ -34,6 +34,8 @@ import indicators
 import risk_management as rm
 from backtester import Backtester
 from data_pipeline import validate_ticker
+from indicators import add_indicators_custom
+from optimizer import STRATEGY_PARAM_BOUNDS, StrategyOptimizer
 from portfolio import Portfolio
 from trading_agent import (
     STRATEGY_REGISTRY,
@@ -69,6 +71,7 @@ PAGES = [
     "💼 Portfolio",
     "🔬 Backtest",
     "⚠️ Risk Management",
+    "🔧 Parameter Optimizer",
 ]
 
 
@@ -250,6 +253,90 @@ with st.sidebar:
 
     st.divider()
 
+    # ---- Capital & Risk Settings ----
+    with st.expander("💰 Capital & Risk Settings"):
+        sidebar_initial_capital = st.number_input(
+            "Initial Capital (PHP)",
+            min_value=10_000,
+            max_value=100_000_000,
+            value=int(config.INITIAL_CAPITAL),
+            step=100_000,
+            help="Virtual starting capital used for all simulations and backtests.",
+        )
+        sidebar_max_position_pct = st.slider(
+            "Max Position Size (%)", 1, 20,
+            int(config.MAX_POSITION_PCT * 100),
+            help="Maximum fraction of capital deployed per trade.",
+        ) / 100.0
+        sidebar_stop_loss_pct = st.slider(
+            "Stop-Loss (%)", 1, 15,
+            int(config.STOP_LOSS_PCT * 100),
+            help="Sell position when price falls this % below entry.",
+        ) / 100.0
+        sidebar_take_profit_pct = st.slider(
+            "Take-Profit (%)", 1, 25,
+            int(config.TAKE_PROFIT_PCT * 100),
+            help="Sell position when price rises this % above entry.",
+        ) / 100.0
+        sidebar_max_daily_loss_pct = st.slider(
+            "Max Daily Loss (%)", 1, 15,
+            int(config.MAX_DAILY_LOSS_PCT * 100),
+            help="Halt all trading if daily loss exceeds this % of initial capital.",
+        ) / 100.0
+
+    # ---- Strategy Parameters ----
+    with st.expander("📐 Strategy Parameters"):
+        if strategy_name == "EMA Crossover":
+            sidebar_ema_fast = st.slider(
+                "Fast EMA Period", 2, 20, config.EMA_FAST,
+                help="Short look-back period for the fast EMA.",
+            )
+            sidebar_ema_slow = st.slider(
+                "Slow EMA Period", 10, 100, config.EMA_SLOW,
+                help="Long look-back period for the slow EMA.",
+            )
+            # Ensure fast < slow
+            if sidebar_ema_fast >= sidebar_ema_slow:
+                st.warning("Fast EMA period must be less than Slow EMA period.")
+            sidebar_rsi_period = config.RSI_PERIOD
+            sidebar_rsi_oversold = config.RSI_OVERSOLD
+            sidebar_rsi_overbought = config.RSI_OVERBOUGHT
+            sidebar_bollinger_period = config.BOLLINGER_PERIOD
+            sidebar_bollinger_std = config.BOLLINGER_STD
+        elif strategy_name == "RSI Mean-Reversion":
+            sidebar_rsi_period = st.slider(
+                "RSI Period", 5, 30, config.RSI_PERIOD,
+                help="Look-back period for RSI calculation.",
+            )
+            sidebar_rsi_oversold = st.slider(
+                "RSI Oversold Threshold", 10, 45, int(config.RSI_OVERSOLD),
+                help="RSI level considered oversold (BUY signal).",
+            )
+            sidebar_rsi_overbought = st.slider(
+                "RSI Overbought Threshold", 55, 90, int(config.RSI_OVERBOUGHT),
+                help="RSI level considered overbought (SELL signal).",
+            )
+            sidebar_ema_fast = config.EMA_FAST
+            sidebar_ema_slow = config.EMA_SLOW
+            sidebar_bollinger_period = config.BOLLINGER_PERIOD
+            sidebar_bollinger_std = config.BOLLINGER_STD
+        else:  # Bollinger Bands
+            sidebar_bollinger_period = st.slider(
+                "Bollinger Period", 5, 50, config.BOLLINGER_PERIOD,
+                help="Rolling window for Bollinger Bands.",
+            )
+            sidebar_bollinger_std = st.slider(
+                "Bollinger Std Dev", 1.0, 3.5, float(config.BOLLINGER_STD), step=0.1,
+                help="Number of standard deviations for the band width.",
+            )
+            sidebar_ema_fast = config.EMA_FAST
+            sidebar_ema_slow = config.EMA_SLOW
+            sidebar_rsi_period = config.RSI_PERIOD
+            sidebar_rsi_oversold = config.RSI_OVERSOLD
+            sidebar_rsi_overbought = config.RSI_OVERBOUGHT
+
+    st.divider()
+
     if use_live:
         period = st.selectbox(
             "Period",
@@ -268,7 +355,7 @@ with st.sidebar:
 
     st.divider()
     if st.button("🔄 Reset Portfolio", use_container_width=True):
-        st.session_state["portfolio"] = Portfolio(config.INITIAL_CAPITAL)
+        st.session_state["portfolio"] = Portfolio(sidebar_initial_capital)
         st.success("Portfolio reset.")
 
 
@@ -306,8 +393,54 @@ def load_data() -> pd.DataFrame:
 
 
 def _get_strategy():
-    """Return the strategy instance selected in the sidebar."""
-    return STRATEGY_REGISTRY[strategy_name]
+    """Return the strategy instance built from the current sidebar parameters."""
+    if strategy_name == "EMA Crossover":
+        return EMACrossoverStrategy(
+            fast_period=sidebar_ema_fast,
+            slow_period=sidebar_ema_slow,
+        )
+    if strategy_name == "RSI Mean-Reversion":
+        return RSIStrategy(
+            oversold=sidebar_rsi_oversold,
+            overbought=sidebar_rsi_overbought,
+        )
+    return BollingerBandStrategy()
+
+
+def _add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute indicators using the current sidebar parameter values."""
+    return add_indicators_custom(
+        df,
+        ema_fast=sidebar_ema_fast,
+        ema_slow=sidebar_ema_slow,
+        rsi_period=sidebar_rsi_period,
+        bollinger_period=sidebar_bollinger_period,
+        bollinger_std=sidebar_bollinger_std,
+    )
+
+
+def _make_backtester(initial_capital: float | None = None) -> Backtester:
+    """Create a Backtester configured with the current sidebar risk parameters."""
+    return Backtester(
+        initial_capital=initial_capital if initial_capital is not None else sidebar_initial_capital,
+        strategy=_get_strategy(),
+        max_position_pct=sidebar_max_position_pct,
+        stop_loss_pct=sidebar_stop_loss_pct,
+        take_profit_pct=sidebar_take_profit_pct,
+        max_daily_loss_pct=sidebar_max_daily_loss_pct,
+    )
+
+
+def _make_agent(portfolio: Portfolio) -> TradingAgent:
+    """Create a TradingAgent configured with the current sidebar risk parameters."""
+    return TradingAgent(
+        portfolio,
+        _get_strategy(),
+        max_position_pct=sidebar_max_position_pct,
+        stop_loss_pct=sidebar_stop_loss_pct,
+        take_profit_pct=sidebar_take_profit_pct,
+        max_daily_loss_pct=sidebar_max_daily_loss_pct,
+    )
 
 
 # ===========================================================================
@@ -322,7 +455,7 @@ if page == PAGES[0]:
     )
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Initial Capital", _format_php(config.INITIAL_CAPITAL))
+    col1.metric("Initial Capital", _format_php(sidebar_initial_capital))
     col2.metric("Tickers Available", len(_all_tickers))
     col3.metric("Data Interval", config.DATA_INTERVAL)
 
@@ -333,23 +466,23 @@ if page == PAGES[0]:
     with c1:
         st.subheader("Strategy Parameters")
         params = {
-            "Fast EMA": config.EMA_FAST,
-            "Slow EMA": config.EMA_SLOW,
-            "RSI Period": config.RSI_PERIOD,
-            "RSI Overbought": config.RSI_OVERBOUGHT,
-            "RSI Oversold": config.RSI_OVERSOLD,
-            "Bollinger Period": config.BOLLINGER_PERIOD,
-            "Bollinger Std": config.BOLLINGER_STD,
+            "Fast EMA": sidebar_ema_fast,
+            "Slow EMA": sidebar_ema_slow,
+            "RSI Period": sidebar_rsi_period,
+            "RSI Overbought": sidebar_rsi_overbought,
+            "RSI Oversold": sidebar_rsi_oversold,
+            "Bollinger Period": sidebar_bollinger_period,
+            "Bollinger Std": sidebar_bollinger_std,
         }
         st.table(pd.DataFrame(params.items(), columns=["Parameter", "Value"]))
 
     with c2:
         st.subheader("Risk Parameters")
         risk_params = {
-            "Max Position %": f"{config.MAX_POSITION_PCT * 100:.0f}%",
-            "Stop-Loss %": f"{config.STOP_LOSS_PCT * 100:.0f}%",
-            "Take-Profit %": f"{config.TAKE_PROFIT_PCT * 100:.0f}%",
-            "Max Daily Loss %": f"{config.MAX_DAILY_LOSS_PCT * 100:.0f}%",
+            "Max Position %": f"{sidebar_max_position_pct * 100:.0f}%",
+            "Stop-Loss %": f"{sidebar_stop_loss_pct * 100:.0f}%",
+            "Take-Profit %": f"{sidebar_take_profit_pct * 100:.0f}%",
+            "Max Daily Loss %": f"{sidebar_max_daily_loss_pct * 100:.0f}%",
         }
         st.table(pd.DataFrame(risk_params.items(), columns=["Parameter", "Value"]))
 
@@ -407,11 +540,10 @@ elif page == PAGES[1]:
             st.stop()
 
         with st.spinner("Computing indicators…"):
-            sim_ind = indicators.add_indicators(sim_raw)
+            sim_ind = _add_indicators(sim_raw)
 
-        portfolio = Portfolio(config.INITIAL_CAPITAL)
-        strategy = _get_strategy()
-        agent = TradingAgent(portfolio, strategy)
+        portfolio = Portfolio(sidebar_initial_capital)
+        agent = _make_agent(portfolio)
         with st.spinner("Running strategy…"):
             sim_ready = agent.prepare_signals_df(sim_ind)
             sim_signals = agent.run(sim_ready)
@@ -486,7 +618,7 @@ elif page == PAGES[1]:
         eq_df = pd.DataFrame({"Candle": range(len(eq_points)), "Portfolio Value (PHP)": eq_points})
         fig_eq = px.line(eq_df, x="Candle", y="Portfolio Value (PHP)", title="Portfolio Value Over Time")
         fig_eq.add_hline(
-            y=config.INITIAL_CAPITAL, line_dash="dash", line_color="grey",
+            y=sidebar_initial_capital, line_dash="dash", line_color="grey",
             annotation_text="Initial Capital",
         )
         st.plotly_chart(fig_eq, use_container_width=True)
@@ -500,8 +632,8 @@ elif page == PAGES[1]:
     buys = t_df[t_df["Signal"] == "BUY"]
     sells = t_df[t_df["Signal"] == "SELL"]
 
-    fast_col = f"EMA_{config.EMA_FAST}"
-    slow_col = f"EMA_{config.EMA_SLOW}"
+    fast_col = f"EMA_{sidebar_ema_fast}"
+    slow_col = f"EMA_{sidebar_ema_slow}"
 
     fig_sig = go.Figure()
     fig_sig.add_trace(go.Scatter(
@@ -510,12 +642,12 @@ elif page == PAGES[1]:
     ))
     if fast_col in t_df.columns:
         fig_sig.add_trace(go.Scatter(
-            x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {config.EMA_FAST}",
+            x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {sidebar_ema_fast}",
             line=dict(color="orange", width=1.5, dash="dash"),
         ))
     if slow_col in t_df.columns:
         fig_sig.add_trace(go.Scatter(
-            x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {config.EMA_SLOW}",
+            x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {sidebar_ema_slow}",
             line=dict(color="red", width=1.5, dash="dash"),
         ))
     if "BB_upper" in t_df.columns:
@@ -566,7 +698,7 @@ elif page == PAGES[1]:
 
     # Strategy-specific indicator columns to display alongside the signal
     _strategy_indicator_cols: dict[str, list[str]] = {
-        "EMA Crossover": [f"EMA_{config.EMA_FAST}", f"EMA_{config.EMA_SLOW}"],
+        "EMA Crossover": [f"EMA_{sidebar_ema_fast}", f"EMA_{sidebar_ema_slow}"],
         "RSI Mean-Reversion": ["RSI"],
         "Bollinger Bands": ["BB_upper", "BB_middle", "BB_lower"],
     }
@@ -678,7 +810,7 @@ elif page == PAGES[3]:
         st.session_state["raw_df"] = raw_df
 
     with st.spinner("Computing indicators…"):
-        ind_df = indicators.add_indicators(raw_df)
+        ind_df = _add_indicators(raw_df)
 
     st.session_state["ind_df"] = ind_df
 
@@ -686,8 +818,8 @@ elif page == PAGES[3]:
     chart_ticker = st.selectbox("Select Ticker", unique_tickers)
     t_df = ind_df[ind_df["Ticker"] == chart_ticker].copy()
 
-    fast_col = f"EMA_{config.EMA_FAST}"
-    slow_col = f"EMA_{config.EMA_SLOW}"
+    fast_col = f"EMA_{sidebar_ema_fast}"
+    slow_col = f"EMA_{sidebar_ema_slow}"
 
     # --- Price + EMA chart ---
     st.subheader(f"{chart_ticker} – Price & EMAs")
@@ -696,10 +828,10 @@ elif page == PAGES[3]:
         go.Scatter(x=t_df["Datetime"], y=t_df["Close"], name="Close", line=dict(color="royalblue", width=1))
     )
     fig_price.add_trace(
-        go.Scatter(x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {config.EMA_FAST}", line=dict(color="orange", width=1.5, dash="dash"))
+        go.Scatter(x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {sidebar_ema_fast}", line=dict(color="orange", width=1.5, dash="dash"))
     )
     fig_price.add_trace(
-        go.Scatter(x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {config.EMA_SLOW}", line=dict(color="red", width=1.5, dash="dash"))
+        go.Scatter(x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {sidebar_ema_slow}", line=dict(color="red", width=1.5, dash="dash"))
     )
     fig_price.add_trace(
         go.Scatter(x=t_df["Datetime"], y=t_df["BB_upper"], name="BB Upper", line=dict(color="grey", width=1, dash="dot"))
@@ -712,11 +844,11 @@ elif page == PAGES[3]:
     st.plotly_chart(fig_price, use_container_width=True)
 
     # --- RSI chart ---
-    st.subheader(f"{chart_ticker} – RSI ({config.RSI_PERIOD})")
+    st.subheader(f"{chart_ticker} – RSI ({sidebar_rsi_period})")
     fig_rsi = go.Figure()
     fig_rsi.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["RSI"], name="RSI", line=dict(color="purple")))
-    fig_rsi.add_hline(y=config.RSI_OVERBOUGHT, line_dash="dash", line_color="red", annotation_text="Overbought")
-    fig_rsi.add_hline(y=config.RSI_OVERSOLD, line_dash="dash", line_color="green", annotation_text="Oversold")
+    fig_rsi.add_hline(y=sidebar_rsi_overbought, line_dash="dash", line_color="red", annotation_text="Overbought")
+    fig_rsi.add_hline(y=sidebar_rsi_oversold, line_dash="dash", line_color="green", annotation_text="Oversold")
     fig_rsi.update_layout(height=250, yaxis=dict(range=[0, 100]), xaxis_title="Datetime", yaxis_title="RSI")
     st.plotly_chart(fig_rsi, use_container_width=True)
 
@@ -753,12 +885,12 @@ elif page == PAGES[4]:
     ind_df = st.session_state.get("ind_df")
     if ind_df is None:
         with st.spinner("Computing indicators…"):
-            ind_df = indicators.add_indicators(raw_df)
+            ind_df = _add_indicators(raw_df)
         st.session_state["ind_df"] = ind_df
 
     if st.button("▶ Generate Signals", type="primary"):
-        portfolio = Portfolio(config.INITIAL_CAPITAL)
-        agent = TradingAgent(portfolio, _get_strategy())
+        portfolio = Portfolio(sidebar_initial_capital)
+        agent = _make_agent(portfolio)
         with st.spinner("Running trading agent…"):
             ready_df = agent.prepare_signals_df(ind_df)
             signals_df = agent.run(ready_df)
@@ -784,8 +916,8 @@ elif page == PAGES[4]:
     chart_ticker = st.selectbox("Select Ticker", unique_tickers)
     t_df = signals_df[signals_df["Ticker"] == chart_ticker].copy()
 
-    fast_col = f"EMA_{config.EMA_FAST}"
-    slow_col = f"EMA_{config.EMA_SLOW}"
+    fast_col = f"EMA_{sidebar_ema_fast}"
+    slow_col = f"EMA_{sidebar_ema_slow}"
 
     buys = t_df[t_df["Signal"] == "BUY"]
     sells = t_df[t_df["Signal"] == "SELL"]
@@ -793,9 +925,9 @@ elif page == PAGES[4]:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["Close"], name="Close", line=dict(color="royalblue", width=1)))
     if fast_col in t_df.columns:
-        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {config.EMA_FAST}", line=dict(color="orange", width=1.5, dash="dash")))
+        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {sidebar_ema_fast}", line=dict(color="orange", width=1.5, dash="dash")))
     if slow_col in t_df.columns:
-        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {config.EMA_SLOW}", line=dict(color="red", width=1.5, dash="dash")))
+        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {sidebar_ema_slow}", line=dict(color="red", width=1.5, dash="dash")))
     if "BB_upper" in t_df.columns and st.session_state.get("signals_strategy") in ("Bollinger Bands", None):
         fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["BB_upper"], name="BB Upper", line=dict(color="grey", width=1, dash="dot")))
         fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["BB_lower"], name="BB Lower", line=dict(color="grey", width=1, dash="dot"),
@@ -950,21 +1082,20 @@ elif page == PAGES[6]:
     ind_df = st.session_state.get("ind_df")
     if ind_df is None:
         with st.spinner("Computing indicators…"):
-            ind_df = indicators.add_indicators(raw_df)
+            ind_df = _add_indicators(raw_df)
         st.session_state["ind_df"] = ind_df
 
-    col_a, col_b = st.columns(2)
-    initial_capital = col_a.number_input(
-        "Initial Capital (PHP)",
-        min_value=10_000,
-        max_value=100_000_000,
-        value=int(config.INITIAL_CAPITAL),
-        step=100_000,
+    st.info(
+        f"Capital and risk settings are configured in the **💰 Capital & Risk Settings** "
+        f"expander in the sidebar.  "
+        f"Current: Initial Capital = **{_format_php(sidebar_initial_capital)}** | "
+        f"Stop-Loss = **{sidebar_stop_loss_pct * 100:.0f}%** | "
+        f"Take-Profit = **{sidebar_take_profit_pct * 100:.0f}%**"
     )
 
     if st.button("▶ Run Backtest", type="primary"):
         with st.spinner("Running backtest…"):
-            bt = Backtester(initial_capital=initial_capital, strategy=_get_strategy())
+            bt = _make_backtester()
             metrics = bt.run(ind_df)
         st.session_state["bt_metrics"] = metrics
         st.success(f"Backtest complete using **{strategy_name}**!")
@@ -992,7 +1123,7 @@ elif page == PAGES[6]:
     if len(eq) > 0:
         eq_df = pd.DataFrame({"Candle": range(len(eq)), "Portfolio Value (PHP)": eq.values})
         fig_eq = px.line(eq_df, x="Candle", y="Portfolio Value (PHP)", title="Portfolio Value Over Time")
-        fig_eq.add_hline(y=initial_capital, line_dash="dash", line_color="grey", annotation_text="Initial Capital")
+        fig_eq.add_hline(y=sidebar_initial_capital, line_dash="dash", line_color="grey", annotation_text="Initial Capital")
         st.plotly_chart(fig_eq, use_container_width=True)
 
     # Per-ticker summary
@@ -1118,3 +1249,276 @@ elif page == PAGES[7]:
         ],
     }
     st.table(pd.DataFrame(ref))
+
+
+# ===========================================================================
+# PAGE: Parameter Optimizer
+# ===========================================================================
+
+elif page == PAGES[8]:
+    st.title("🔧 Parameter Optimizer")
+    st.markdown(
+        "Automatically search for **strategy and risk parameters** that maximise "
+        "total return on the loaded data using an iterative hill-climbing algorithm.\n\n"
+        "The optimizer runs repeated backtests, each time tweaking the parameters "
+        "slightly and keeping changes that improve the return.  A random exploration "
+        "step prevents getting stuck in local optima.  All explored parameter sets "
+        "are constrained to human-reasonable bounds."
+    )
+
+    # ---- Configuration ----
+    st.subheader("⚙️ Optimizer Settings")
+
+    opt_col1, opt_col2, opt_col3 = st.columns(3)
+
+    with opt_col1:
+        opt_strategy = st.selectbox(
+            "Strategy to Optimise",
+            list(STRATEGY_PARAM_BOUNDS.keys()),
+            index=list(STRATEGY_PARAM_BOUNDS.keys()).index(strategy_name)
+            if strategy_name in STRATEGY_PARAM_BOUNDS else 0,
+            help="Select the strategy whose parameters will be optimised.",
+        )
+
+    with opt_col2:
+        opt_iterations = st.number_input(
+            "Number of Iterations",
+            min_value=10,
+            max_value=500,
+            value=50,
+            step=10,
+            help=(
+                "How many optimisation steps to run.  More iterations explore more "
+                "of the parameter space but take longer.  50–100 is a good starting point."
+            ),
+        )
+
+    with opt_col3:
+        opt_capital = st.number_input(
+            "Initial Capital (PHP)",
+            min_value=10_000,
+            max_value=100_000_000,
+            value=int(sidebar_initial_capital),
+            step=100_000,
+            help="Virtual capital used during each backtest evaluation.",
+        )
+
+    # Parameter bounds reference table
+    with st.expander("📋 Parameter Bounds for Selected Strategy", expanded=False):
+        bounds = STRATEGY_PARAM_BOUNDS[opt_strategy]
+        bounds_data = [
+            {
+                "Parameter": b.name,
+                "Min": b.min_val,
+                "Max": b.max_val,
+                "Default": b.initial,
+                "Type": "integer" if b.is_int else "float",
+            }
+            for b in bounds
+        ]
+        st.dataframe(pd.DataFrame(bounds_data), use_container_width=True, hide_index=True)
+
+    # ---- Data loading ----
+    raw_df_opt = st.session_state.get("raw_df")
+    if raw_df_opt is None:
+        with st.spinner("Loading data for optimisation…"):
+            raw_df_opt = load_data()
+        st.session_state["raw_df"] = raw_df_opt
+
+    if raw_df_opt.empty:
+        st.error(
+            "No data available.  "
+            "Switch to synthetic data or adjust the date range in the sidebar."
+        )
+        st.stop()
+
+    # ---- Run optimisation ----
+    st.divider()
+    if st.button("▶ Run Optimizer", type="primary"):
+        progress_bar = st.progress(0, text="Initialising…")
+        status_text = st.empty()
+
+        def _update_progress(i: int, total: int, best_ret: float, best_p: dict) -> None:
+            pct = int(i / total * 100)
+            progress_bar.progress(pct, text=f"Iteration {i}/{total} — best return: {best_ret:+.3f}%")
+            status_text.caption(f"Best params so far: {best_p}")
+
+        with st.spinner("Running optimisation…"):
+            opt = StrategyOptimizer(
+                df_raw=raw_df_opt,
+                strategy_name=opt_strategy,
+                initial_capital=float(opt_capital),
+                n_iterations=int(opt_iterations),
+                seed=42,
+            )
+            result = opt.run(progress_callback=_update_progress)
+
+        progress_bar.progress(100, text="✅ Optimisation complete!")
+        status_text.empty()
+        st.session_state["opt_result"] = result
+        st.success(
+            f"Optimisation finished in **{result.n_evaluations}** backtest evaluations.  "
+            f"Best return: **{result.best_return_pct:+.3f}%**"
+        )
+
+    # ---- Results ----
+    result = st.session_state.get("opt_result")
+    if result is None:
+        st.info(
+            "Configure the settings above and click **▶ Run Optimizer** to start the search."
+        )
+        st.stop()
+
+    if result.strategy_name != opt_strategy:
+        st.warning(
+            f"Displayed results are for **{result.strategy_name}**, "
+            f"not the currently selected **{opt_strategy}**.  "
+            "Re-run the optimizer to get fresh results."
+        )
+
+    # ---- Key metrics comparison ----
+    st.divider()
+    st.subheader("📊 Results Summary")
+
+    improvement = result.best_return_pct - result.initial_return_pct
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric(
+        "Initial Return (default params)",
+        f"{result.initial_return_pct:+.3f}%",
+    )
+    r2.metric(
+        "Best Return (optimised params)",
+        f"{result.best_return_pct:+.3f}%",
+        delta=f"{improvement:+.3f}%",
+    )
+    r3.metric("Iterations", result.n_iterations)
+    r4.metric("Evaluations", result.n_evaluations)
+
+    # ---- Parameter comparison table ----
+    st.divider()
+    st.subheader("🔬 Parameter Comparison")
+
+    bounds_map = {b.name: b for b in STRATEGY_PARAM_BOUNDS[result.strategy_name]}
+    comparison_rows = []
+    for name in result.initial_params:
+        b = bounds_map.get(name)
+        initial_val = result.initial_params[name]
+        best_val = result.best_params[name]
+        fmt = "{:.0f}" if (b and b.is_int) else "{:.4f}"
+        comparison_rows.append({
+            "Parameter": name,
+            "Default Value": fmt.format(initial_val),
+            "Optimised Value": fmt.format(best_val),
+            "Range": f"[{b.min_val}, {b.max_val}]" if b else "—",
+            "Changed": "✅" if abs(best_val - initial_val) > 1e-9 else "—",
+        })
+    st.dataframe(
+        pd.DataFrame(comparison_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # ---- Convergence chart ----
+    st.divider()
+    st.subheader("📈 Convergence Chart")
+    st.markdown(
+        "The best return found so far plotted against the iteration number.  "
+        "A flat line after some point indicates convergence."
+    )
+    history_df = pd.DataFrame(
+        [(i, r) for i, r, _ in result.iteration_history],
+        columns=["Iteration", "Best Return (%)"],
+    )
+    fig_conv = px.line(
+        history_df,
+        x="Iteration",
+        y="Best Return (%)",
+        title=f"{result.strategy_name} – Optimisation Convergence",
+        markers=False,
+    )
+    fig_conv.add_hline(
+        y=result.initial_return_pct,
+        line_dash="dash",
+        line_color="grey",
+        annotation_text="Default params baseline",
+    )
+    fig_conv.update_layout(height=350)
+    st.plotly_chart(fig_conv, use_container_width=True)
+
+    # ---- Verify best params with a full backtest ----
+    st.divider()
+    st.subheader("✅ Verification Backtest (Best Parameters)")
+    st.markdown(
+        "Run a full backtest using the optimised parameters to see detailed metrics "
+        "and the equity curve."
+    )
+
+    if st.button("▶ Run Verification Backtest", key="opt_verify_btn"):
+        bp = result.best_params
+        with st.spinner("Building strategy and running backtest…"):
+            df_ind_opt = add_indicators_custom(
+                raw_df_opt,
+                ema_fast=int(bp.get("ema_fast", config.EMA_FAST)),
+                ema_slow=int(bp.get("ema_slow", config.EMA_SLOW)),
+                rsi_period=int(bp.get("rsi_period", config.RSI_PERIOD)),
+                bollinger_period=int(bp.get("bollinger_period", config.BOLLINGER_PERIOD)),
+                bollinger_std=float(bp.get("bollinger_std", config.BOLLINGER_STD)),
+            )
+
+            if result.strategy_name == "EMA Crossover":
+                verify_strategy = EMACrossoverStrategy(
+                    fast_period=int(bp["ema_fast"]),
+                    slow_period=int(bp["ema_slow"]),
+                )
+            elif result.strategy_name == "RSI Mean-Reversion":
+                verify_strategy = RSIStrategy(
+                    oversold=float(bp["rsi_oversold"]),
+                    overbought=float(bp["rsi_overbought"]),
+                )
+            else:
+                verify_strategy = BollingerBandStrategy()
+
+            verify_bt = Backtester(
+                initial_capital=float(opt_capital),
+                strategy=verify_strategy,
+                max_position_pct=float(bp.get("max_position_pct", config.MAX_POSITION_PCT)),
+                stop_loss_pct=float(bp.get("stop_loss_pct", config.STOP_LOSS_PCT)),
+                take_profit_pct=float(bp.get("take_profit_pct", config.TAKE_PROFIT_PCT)),
+            )
+            verify_metrics = verify_bt.run(df_ind_opt)
+
+        st.session_state["opt_verify_metrics"] = verify_metrics
+        st.success("Verification backtest complete!")
+
+    verify_metrics = st.session_state.get("opt_verify_metrics")
+    if verify_metrics is not None:
+        vm = verify_metrics
+        v1, v2, v3, v4, v5, v6 = st.columns(6)
+        v1.metric("Total Return", f"{vm['total_return_pct']:+.2f}%")
+        v2.metric("Sharpe Ratio", f"{vm['sharpe_ratio']:.4f}")
+        v3.metric("Max Drawdown", f"{vm['max_drawdown'] * 100:.2f}%")
+        v4.metric("Total Trades", vm["total_trades"])
+        v5.metric("Winning Trades", vm["winning_trades"])
+        v6.metric("Win Rate", f"{vm['win_rate'] * 100:.1f}%")
+
+        eq = vm["equity_curve"]
+        if len(eq) > 0:
+            st.divider()
+            eq_df = pd.DataFrame({"Candle": range(len(eq)), "Portfolio Value (PHP)": eq.values})
+            fig_eq = px.line(
+                eq_df, x="Candle", y="Portfolio Value (PHP)",
+                title="Equity Curve – Optimised Parameters",
+            )
+            fig_eq.add_hline(
+                y=float(opt_capital), line_dash="dash", line_color="grey",
+                annotation_text="Initial Capital",
+            )
+            st.plotly_chart(fig_eq, use_container_width=True)
+
+        st.divider()
+        st.subheader("Per-Ticker Summary")
+        summary_df = vm.get("summary_df")
+        if summary_df is not None and not summary_df.empty:
+            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No completed trades during the backtest period.")

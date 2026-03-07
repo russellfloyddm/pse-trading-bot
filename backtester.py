@@ -64,15 +64,27 @@ class Backtester:
     Args:
         initial_capital: Starting virtual capital in PHP.
         strategy: Optional custom strategy instance.  Defaults to EMA crossover.
+        max_position_pct: Maximum fraction of capital per trade (default: config value).
+        stop_loss_pct: Stop-loss threshold as a decimal (default: config value).
+        take_profit_pct: Take-profit threshold as a decimal (default: config value).
+        max_daily_loss_pct: Daily loss halt threshold as a decimal (default: config value).
     """
 
     def __init__(
         self,
         initial_capital: float = config.INITIAL_CAPITAL,
         strategy: Optional[object] = None,
+        max_position_pct: float = config.MAX_POSITION_PCT,
+        stop_loss_pct: float = config.STOP_LOSS_PCT,
+        take_profit_pct: float = config.TAKE_PROFIT_PCT,
+        max_daily_loss_pct: float = config.MAX_DAILY_LOSS_PCT,
     ) -> None:
         self.initial_capital = initial_capital
         self.strategy = strategy or EMACrossoverStrategy()
+        self.max_position_pct = max_position_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.max_daily_loss_pct = max_daily_loss_pct
 
     # ------------------------------------------------------------------
     # Public API
@@ -100,7 +112,14 @@ class Backtester:
                 - ``summary_df``: Per-ticker summary DataFrame.
         """
         portfolio = Portfolio(self.initial_capital)
-        agent = TradingAgent(portfolio, self.strategy)
+        agent = TradingAgent(
+            portfolio,
+            self.strategy,
+            max_position_pct=self.max_position_pct,
+            stop_loss_pct=self.stop_loss_pct,
+            take_profit_pct=self.take_profit_pct,
+            max_daily_loss_pct=self.max_daily_loss_pct,
+        )
 
         # Prepare lagged EMA columns for crossover detection
         df_ready = agent.prepare_signals_df(df)

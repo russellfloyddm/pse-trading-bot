@@ -126,6 +126,9 @@ def apply_risk_checks(
     portfolio: Portfolio,
     current_price: float,
     timestamp: datetime,
+    stop_loss_pct: float = config.STOP_LOSS_PCT,
+    take_profit_pct: float = config.TAKE_PROFIT_PCT,
+    max_daily_loss_pct: float = config.MAX_DAILY_LOSS_PCT,
 ) -> str:
     """Apply all risk rules and return a forced action if necessary.
 
@@ -139,21 +142,24 @@ def apply_risk_checks(
         portfolio: Active Portfolio instance.
         current_price: Latest price for the ticker.
         timestamp: Current candle timestamp.
+        stop_loss_pct: Stop-loss threshold (default: config value).
+        take_profit_pct: Take-profit threshold (default: config value).
+        max_daily_loss_pct: Maximum daily loss threshold (default: config value).
 
     Returns:
         "HALT", "SELL", or "NONE" (no forced action required).
     """
     # 1. Daily loss limit
-    if check_daily_loss_limit(portfolio):
+    if check_daily_loss_limit(portfolio, max_daily_loss_pct):
         return "HALT"
 
     # 2 & 3. Check open position for this ticker
     pos = portfolio.positions.get(ticker)
     if pos is not None:
-        if check_stop_loss(pos.avg_cost, current_price):
+        if check_stop_loss(pos.avg_cost, current_price, stop_loss_pct):
             logger.info("Risk: stop-loss SELL for %s @ %.4f", ticker, current_price)
             return "SELL"
-        if check_take_profit(pos.avg_cost, current_price):
+        if check_take_profit(pos.avg_cost, current_price, take_profit_pct):
             logger.info("Risk: take-profit SELL for %s @ %.4f", ticker, current_price)
             return "SELL"
 
