@@ -18,24 +18,31 @@ def compute_position_size(
     price: float,
     max_pct: float = config.MAX_POSITION_PCT,
 ) -> float:
-    """Compute the number of shares to buy based on capital allocation.
+    """Compute the number of units to buy based on capital allocation.
 
-    Limits the trade to *max_pct* of available capital and returns the whole
-    number of shares that can be purchased.
+    Limits the trade to *max_pct* of available capital.  For assets priced
+    below the per-trade budget (e.g. PSE equities), the result is truncated
+    to whole shares.  For high-priced assets where the budget buys less than
+    one whole unit (e.g. BTC-USD), a fractional quantity is returned so that
+    capital can still be deployed.
 
     Args:
-        capital: Available capital in PHP.
-        price: Current price per share.
+        capital: Available capital.
+        price: Current price per unit.
         max_pct: Maximum fraction of capital to allocate (default 5%).
 
     Returns:
-        Number of shares (floored to nearest whole share). 0 if price <= 0.
+        Number of units to purchase.  Returns a whole number when the
+        affordable quantity is ≥ 1, otherwise returns a fractional value
+        rounded to 8 decimal places (crypto-standard precision).
+        Returns 0.0 if price ≤ 0.
     """
     if price <= 0:
         return 0.0
     max_spend = capital * max_pct
     shares = max_spend / price
-    return float(int(shares))  # whole shares only
+    # Fractional units for high-priced assets (e.g. crypto); whole shares otherwise
+    return round(shares, 8) if shares < 1 else float(int(shares))
 
 
 def check_stop_loss(

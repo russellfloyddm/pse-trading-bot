@@ -215,6 +215,24 @@ class TestRiskManagement:
     def test_compute_position_size_zero_price(self):
         assert compute_position_size(1_000_000, 0.0) == 0.0
 
+    def test_compute_position_size_fractional_for_high_price(self):
+        """High-priced assets (e.g. BTC-USD ~85,000) must return fractional units."""
+        shares = compute_position_size(1_000_000, 85_000.0, max_pct=0.05)
+        # 5% of 1,000,000 = 50,000 / 85,000 ≈ 0.5882 BTC
+        assert 0 < shares < 1, f"Expected fractional share, got {shares}"
+        assert round(shares, 8) == shares  # precision capped at 8 dp
+
+    def test_compute_position_size_fractional_enables_btc_trade(self):
+        """A fractional quantity > 0 means BUY will be executed for BTC-USD."""
+        shares = compute_position_size(1_000_000, 85_000.0, max_pct=0.05)
+        assert shares > 0  # trade is not silently skipped
+
+    def test_compute_position_size_whole_shares_unchanged(self):
+        """Whole-share truncation still applies when affordable quantity >= 1."""
+        # 5% of 1,000,000 = 50,000 / 90 per share = 555.55... -> 555
+        shares = compute_position_size(1_000_000, 90.0, max_pct=0.05)
+        assert shares == 555.0
+
     def test_stop_loss_triggered(self):
         assert check_stop_loss(100.0, 97.0, 0.02) is True  # 3% drop > 2% threshold
 
@@ -781,3 +799,169 @@ class TestValidateTicker:
 
         with patch("data_pipeline.yf.download", side_effect=Exception("Network error")):
             assert validate_ticker("ERROR.PS") is False
+
+
+# ---------------------------------------------------------------------------
+# fetch_ticker_data_range / fetch_all_tickers_range tests
+# ---------------------------------------------------------------------------
+
+class TestFetchTickerDataRange:
+    """Tests for data_pipeline.fetch_ticker_data_range() and
+    fetch_all_tickers_range() without a live network connection.
+    """
+
+    def _make_raw_df(self) -> pd.DataFrame:
+        """Return a minimal yfinance-style raw DataFrame."""
+        idx = pd.date_range("2026-03-02 09:30", periods=5, freq="1min", tz="UTC")
+        return pd.DataFrame(
+            {
+                "Open": [84000.0, 84010.0, 84020.0, 84030.0, 84040.0],
+                "High": [84050.0, 84060.0, 84070.0, 84080.0, 84090.0],
+                "Low":  [83990.0, 84000.0, 84010.0, 84020.0, 84030.0],
+                "Close": [84010.0, 84020.0, 84030.0, 84040.0, 84050.0],
+                "Volume": [10.0, 11.0, 12.0, 13.0, 14.0],
+            },
+            index=idx,
+        )
+
+    def test_returns_dataframe_with_expected_columns(self):
+        """fetch_ticker_data_range returns a DataFrame with the required columns."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", return_value=self._make_raw_df()):
+            result = fetch_ticker_data_range(
+                "BTC-USD",
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert result is not None
+        assert not result.empty
+        for col in ["Datetime", "Open", "High", "Low", "Close", "Volume", "Ticker"]:
+            assert col in result.columns
+
+    def test_ticker_column_is_populated(self):
+        """The Ticker column matches the ticker passed in."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", return_value=self._make_raw_df()):
+            result = fetch_ticker_data_range(
+                "BTC-USD",
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert (result["Ticker"] == "BTC-USD").all()
+
+    def test_datetime_is_tz_naive(self):
+        """The Datetime column must be tz-naive for consistent downstream use."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", return_value=self._make_raw_df()):
+            result = fetch_ticker_data_range(
+                "BTC-USD",
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert result["Datetime"].dt.tz is None
+
+    def test_end_date_passed_as_exclusive_to_yfinance(self):
+        """yfinance is called with end = end_date + 1 day (exclusive)."""
+        from unittest.mock import patch, call
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", return_value=self._make_raw_df()) as mock_dl:
+            fetch_ticker_data_range(
+                "BTC-USD",
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        _, kwargs = mock_dl.call_args
+        assert kwargs["start"] == "2026-03-02"
+        assert kwargs["end"] == "2026-03-07"   # one day after END_DATE
+
+    def test_returns_none_when_yfinance_empty(self):
+        """Returns None when yfinance returns an empty DataFrame."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", return_value=pd.DataFrame()):
+            result = fetch_ticker_data_range(
+                "INVALID",
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert result is None
+
+    def test_returns_none_on_exception(self):
+        """Returns None when yfinance raises an exception."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", side_effect=Exception("Network error")):
+            result = fetch_ticker_data_range(
+                "BTC-USD",
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert result is None
+
+    def test_fetch_all_tickers_range_combines_frames(self):
+        """fetch_all_tickers_range returns data for all successfully fetched tickers."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_all_tickers_range
+
+        call_count = 0
+
+        def _mock_download(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return self._make_raw_df()
+
+        with patch("data_pipeline.yf.download", side_effect=_mock_download):
+            result = fetch_all_tickers_range(
+                tickers=["BTC-USD", "ETH-USD"],
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert not result.empty
+        assert set(result["Ticker"].unique()) == {"BTC-USD", "ETH-USD"}
+
+    def test_fetch_all_tickers_range_returns_empty_on_all_failures(self):
+        """fetch_all_tickers_range returns an empty DataFrame when every fetch fails."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_all_tickers_range
+
+        with patch("data_pipeline.yf.download", return_value=pd.DataFrame()):
+            result = fetch_all_tickers_range(
+                tickers=["BAD1", "BAD2"],
+                start_date=datetime(2026, 3, 2).date(),
+                end_date=datetime(2026, 3, 6).date(),
+            )
+
+        assert result.empty
+
+    def test_string_dates_are_accepted(self):
+        """fetch_ticker_data_range must accept ISO-format string dates as well as date objects."""
+        from unittest.mock import patch
+        from data_pipeline import fetch_ticker_data_range
+
+        with patch("data_pipeline.yf.download", return_value=self._make_raw_df()) as mock_dl:
+            result = fetch_ticker_data_range(
+                "BTC-USD",
+                start_date="2026-03-02",   # string, not date object
+                end_date="2026-03-06",
+            )
+
+        assert result is not None and not result.empty
+        _, kwargs = mock_dl.call_args
+        assert kwargs["start"] == "2026-03-02"
+        assert kwargs["end"]   == "2026-03-07"   # end+1 day (exclusive)
