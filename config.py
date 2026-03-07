@@ -28,6 +28,12 @@ BACKTEST_PERIOD = "5d"        # Historical period for backtesting (max 7d for 1m
 DATA_SOURCE = "yfinance"      # Market data provider
 
 # ---------------------------------------------------------------------------
+# Backtest date range (used when IS_BACKTEST = True)
+# ---------------------------------------------------------------------------
+BACKTEST_START_DATE = None    # Simulation start date (date object or None)
+BACKTEST_END_DATE = None      # Simulation end date   (date object or None)
+
+# ---------------------------------------------------------------------------
 # File paths
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
