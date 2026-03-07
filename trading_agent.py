@@ -287,15 +287,27 @@ class TradingAgent:
     Args:
         portfolio: Active :class:`~portfolio.Portfolio` instance.
         strategy: A :class:`BaseStrategy` instance (default: EMA crossover).
+        max_position_pct: Maximum fraction of capital per trade (default: config value).
+        stop_loss_pct: Stop-loss threshold as a decimal (default: config value).
+        take_profit_pct: Take-profit threshold as a decimal (default: config value).
+        max_daily_loss_pct: Daily loss halt threshold as a decimal (default: config value).
     """
 
     def __init__(
         self,
         portfolio: Portfolio,
         strategy: BaseStrategy | None = None,
+        max_position_pct: float = config.MAX_POSITION_PCT,
+        stop_loss_pct: float = config.STOP_LOSS_PCT,
+        take_profit_pct: float = config.TAKE_PROFIT_PCT,
+        max_daily_loss_pct: float = config.MAX_DAILY_LOSS_PCT,
     ) -> None:
         self.portfolio = portfolio
         self.strategy = strategy or EMACrossoverStrategy()
+        self.max_position_pct = max_position_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.take_profit_pct = take_profit_pct
+        self.max_daily_loss_pct = max_daily_loss_pct
 
     # ------------------------------------------------------------------
     # Public API
@@ -370,7 +382,12 @@ class TradingAgent:
             raw_signal: Signal = self.strategy.generate_signal(row, ticker)
 
             # 2. Risk override
-            risk_action = rm.apply_risk_checks(ticker, self.portfolio, price, ts)
+            risk_action = rm.apply_risk_checks(
+                ticker, self.portfolio, price, ts,
+                stop_loss_pct=self.stop_loss_pct,
+                take_profit_pct=self.take_profit_pct,
+                max_daily_loss_pct=self.max_daily_loss_pct,
+            )
 
             if risk_action == "HALT":
                 halted = True
@@ -387,7 +404,9 @@ class TradingAgent:
 
             # 3. Execute trade
             if final_signal == "BUY" and ticker not in self.portfolio.positions:
-                shares = rm.compute_position_size(self.portfolio.cash, price)
+                shares = rm.compute_position_size(
+                    self.portfolio.cash, price, max_pct=self.max_position_pct
+                )
                 if shares > 0:
                     self.portfolio.buy(ticker, shares, price, ts, notes=type(self.strategy).__name__)
 

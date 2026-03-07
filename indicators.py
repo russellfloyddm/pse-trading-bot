@@ -111,7 +111,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Compute and append all technical indicators to the market data DataFrame.
 
     Processes each ticker independently so that rolling calculations do not
-    bleed across symbols.
+    bleed across symbols.  Uses the global config values for all parameters.
 
     Args:
         df: Combined OHLCV DataFrame with columns
@@ -122,8 +122,49 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
             EMA_fast, EMA_slow, RSI, BB_upper, BB_middle, BB_lower,
             Returns, Volatility.
     """
+    return add_indicators_custom(
+        df,
+        ema_fast=config.EMA_FAST,
+        ema_slow=config.EMA_SLOW,
+        rsi_period=config.RSI_PERIOD,
+        bollinger_period=config.BOLLINGER_PERIOD,
+        bollinger_std=config.BOLLINGER_STD,
+    )
+
+
+def add_indicators_custom(
+    df: pd.DataFrame,
+    ema_fast: int = config.EMA_FAST,
+    ema_slow: int = config.EMA_SLOW,
+    rsi_period: int = config.RSI_PERIOD,
+    bollinger_period: int = config.BOLLINGER_PERIOD,
+    bollinger_std: float = config.BOLLINGER_STD,
+) -> pd.DataFrame:
+    """Compute and append technical indicators with explicit parameter overrides.
+
+    Identical to :func:`add_indicators` but lets callers pass custom periods
+    and thresholds — useful for optimisation loops and interactive parameter
+    exploration without mutating the global config.
+
+    EMA columns are named ``EMA_{ema_fast}`` and ``EMA_{ema_slow}`` so that
+    multiple different EMA periods can coexist in the same DataFrame.
+
+    Args:
+        df: Combined OHLCV DataFrame with columns
+            [Datetime, Open, High, Low, Close, Volume, Ticker].
+        ema_fast: Fast EMA look-back period.
+        ema_slow: Slow EMA look-back period.
+        rsi_period: RSI look-back period.
+        bollinger_period: Bollinger Bands rolling window.
+        bollinger_std: Number of standard deviations for the Bollinger Bands.
+
+    Returns:
+        DataFrame with additional columns:
+            EMA_{ema_fast}, EMA_{ema_slow}, RSI, BB_upper, BB_middle,
+            BB_lower, Returns, Volatility.
+    """
     if df.empty:
-        logger.warning("add_indicators called with an empty DataFrame.")
+        logger.warning("add_indicators_custom called with an empty DataFrame.")
         return df
 
     results: list[pd.DataFrame] = []
@@ -132,12 +173,12 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         g = group.copy().sort_values("Datetime").reset_index(drop=True)
         close = g["Close"]
 
-        g[f"EMA_{config.EMA_FAST}"] = ema(close, config.EMA_FAST)
-        g[f"EMA_{config.EMA_SLOW}"] = ema(close, config.EMA_SLOW)
-        g["RSI"] = rsi(close, config.RSI_PERIOD)
+        g[f"EMA_{ema_fast}"] = ema(close, ema_fast)
+        g[f"EMA_{ema_slow}"] = ema(close, ema_slow)
+        g["RSI"] = rsi(close, rsi_period)
 
         bb_upper, bb_mid, bb_lower = bollinger_bands(
-            close, config.BOLLINGER_PERIOD, config.BOLLINGER_STD
+            close, bollinger_period, bollinger_std
         )
         g["BB_upper"] = bb_upper
         g["BB_middle"] = bb_mid

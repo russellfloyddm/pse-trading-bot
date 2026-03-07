@@ -965,3 +965,221 @@ class TestFetchTickerDataRange:
         _, kwargs = mock_dl.call_args
         assert kwargs["start"] == "2026-03-02"
         assert kwargs["end"]   == "2026-03-07"   # end+1 day (exclusive)
+
+
+# ---------------------------------------------------------------------------
+# add_indicators_custom tests
+# ---------------------------------------------------------------------------
+
+class TestAddIndicatorsCustom:
+    """Tests for indicators.add_indicators_custom()."""
+
+    def test_custom_ema_columns_created(self):
+        df = _make_ohlcv_df(n_candles=50)
+        result = indicators.add_indicators_custom(df, ema_fast=5, ema_slow=15)
+        assert "EMA_5" in result.columns
+        assert "EMA_15" in result.columns
+
+    def test_custom_rsi_period_accepted(self):
+        df = _make_ohlcv_df(n_candles=50)
+        result = indicators.add_indicators_custom(df, rsi_period=7)
+        assert "RSI" in result.columns
+        rsi_vals = result["RSI"].dropna()
+        assert ((rsi_vals >= 0) & (rsi_vals <= 100)).all()
+
+    def test_custom_bollinger_period_accepted(self):
+        df = _make_ohlcv_df(n_candles=50)
+        result = indicators.add_indicators_custom(df, bollinger_period=10, bollinger_std=1.5)
+        assert "BB_upper" in result.columns
+        assert "BB_lower" in result.columns
+
+    def test_add_indicators_still_uses_config_defaults(self):
+        """add_indicators() must produce identical output to add_indicators_custom
+        called with the config defaults."""
+        df = _make_ohlcv_df(n_candles=50)
+        result_default = indicators.add_indicators(df)
+        result_custom = indicators.add_indicators_custom(
+            df,
+            ema_fast=config.EMA_FAST,
+            ema_slow=config.EMA_SLOW,
+            rsi_period=config.RSI_PERIOD,
+            bollinger_period=config.BOLLINGER_PERIOD,
+            bollinger_std=config.BOLLINGER_STD,
+        )
+        pd.testing.assert_frame_equal(
+            result_default.reset_index(drop=True),
+            result_custom.reset_index(drop=True),
+        )
+
+    def test_empty_dataframe_returns_empty(self):
+        empty = pd.DataFrame(
+            columns=["Datetime", "Open", "High", "Low", "Close", "Volume", "Ticker"]
+        )
+        result = indicators.add_indicators_custom(empty)
+        assert result.empty
+
+
+# ---------------------------------------------------------------------------
+# Risk management – apply_risk_checks with explicit params
+# ---------------------------------------------------------------------------
+
+class TestApplyRiskChecksWithParams:
+    """Tests that apply_risk_checks honours explicit override parameters."""
+
+    def _make_portfolio(self, initial=100_000.0):
+        return Portfolio(initial)
+
+    def test_stop_loss_triggered_with_explicit_pct(self):
+        from risk_management import apply_risk_checks
+        from datetime import datetime as dt
+
+        portfolio = self._make_portfolio()
+        # Add an open position so stop-loss has something to check
+        portfolio.buy("BDO.PS", 100, 100.0, dt(2024, 1, 2, 9, 30))
+        # Current price 5 % below entry — stop-loss should fire with 4 % threshold
+        result = apply_risk_checks(
+            "BDO.PS", portfolio, 95.0, dt(2024, 1, 2, 9, 31),
+            stop_loss_pct=0.04,
+        )
+        assert result == "SELL"
+
+    def test_take_profit_triggered_with_explicit_pct(self):
+        from risk_management import apply_risk_checks
+        from datetime import datetime as dt
+
+        portfolio = self._make_portfolio()
+        portfolio.buy("BDO.PS", 100, 100.0, dt(2024, 1, 2, 9, 30))
+        # Price 10 % above entry — take-profit fires with 8 % threshold
+        result = apply_risk_checks(
+            "BDO.PS", portfolio, 110.0, dt(2024, 1, 2, 9, 31),
+            take_profit_pct=0.08,
+        )
+        assert result == "SELL"
+
+    def test_halt_triggered_with_explicit_daily_loss_pct(self):
+        from risk_management import apply_risk_checks
+        from datetime import datetime as dt
+
+        portfolio = self._make_portfolio(100_000.0)
+        # Simulate a daily loss of 2 % on a 1 % threshold
+        portfolio._daily_realized_pnl = -1_500.0
+        result = apply_risk_checks(
+            "BDO.PS", portfolio, 100.0, dt(2024, 1, 2, 9, 31),
+            max_daily_loss_pct=0.01,
+        )
+        assert result == "HALT"
+
+
+# ---------------------------------------------------------------------------
+# Backtester with custom risk parameters
+# ---------------------------------------------------------------------------
+
+class TestBacktesterWithCustomRiskParams:
+    """Backtester must forward custom risk parameters to TradingAgent."""
+
+    def test_run_with_custom_params_returns_dict(self):
+        df = _make_ohlcv_df(n_candles=100)
+        df_ind = indicators.add_indicators(df)
+        bt = Backtester(
+            initial_capital=500_000.0,
+            max_position_pct=0.10,
+            stop_loss_pct=0.05,
+            take_profit_pct=0.10,
+        )
+        metrics = bt.run(df_ind)
+        assert isinstance(metrics, dict)
+        assert "total_return_pct" in metrics
+
+    def test_run_with_tight_stop_loss_does_not_crash(self):
+        df = _make_ohlcv_df(n_candles=100)
+        df_ind = indicators.add_indicators(df)
+        bt = Backtester(stop_loss_pct=0.001)   # extremely tight stop
+        metrics = bt.run(df_ind)
+        assert "total_trades" in metrics
+
+
+# ---------------------------------------------------------------------------
+# StrategyOptimizer tests
+# ---------------------------------------------------------------------------
+
+class TestStrategyOptimizer:
+    """Tests for optimizer.StrategyOptimizer."""
+
+    @staticmethod
+    def _make_df(n_candles: int = 100) -> pd.DataFrame:
+        return _make_ohlcv_df(n_candles=n_candles)
+
+    def test_unknown_strategy_raises(self):
+        from optimizer import StrategyOptimizer
+        with pytest.raises(ValueError, match="Unknown strategy"):
+            StrategyOptimizer(self._make_df(), "NonExistent Strategy")
+
+    def test_run_returns_optimization_result(self):
+        from optimizer import StrategyOptimizer, OptimizationResult
+        opt = StrategyOptimizer(self._make_df(), "EMA Crossover", n_iterations=3)
+        result = opt.run()
+        assert isinstance(result, OptimizationResult)
+
+    def test_result_has_correct_strategy_name(self):
+        from optimizer import StrategyOptimizer
+        opt = StrategyOptimizer(self._make_df(), "RSI Mean-Reversion", n_iterations=3)
+        result = opt.run()
+        assert result.strategy_name == "RSI Mean-Reversion"
+
+    def test_iteration_history_length(self):
+        from optimizer import StrategyOptimizer
+        n = 5
+        opt = StrategyOptimizer(self._make_df(), "EMA Crossover", n_iterations=n)
+        result = opt.run()
+        # history[0] = initial evaluation + one entry per iteration
+        assert len(result.iteration_history) == n + 1
+
+    def test_n_evaluations_at_least_n_iterations(self):
+        from optimizer import StrategyOptimizer
+        n = 4
+        opt = StrategyOptimizer(self._make_df(), "Bollinger Bands", n_iterations=n)
+        result = opt.run()
+        # 1 initial + n candidates
+        assert result.n_evaluations >= n + 1
+
+    def test_best_params_respect_bounds(self):
+        from optimizer import StrategyOptimizer, STRATEGY_PARAM_BOUNDS
+        strategy = "EMA Crossover"
+        opt = StrategyOptimizer(self._make_df(), strategy, n_iterations=5)
+        result = opt.run()
+        bounds = {b.name: b for b in STRATEGY_PARAM_BOUNDS[strategy]}
+        for name, val in result.best_params.items():
+            b = bounds[name]
+            assert b.min_val <= val <= b.max_val, (
+                f"{name}={val} is outside [{b.min_val}, {b.max_val}]"
+            )
+
+    def test_rsi_strategy_completes(self):
+        from optimizer import StrategyOptimizer
+        opt = StrategyOptimizer(self._make_df(), "RSI Mean-Reversion", n_iterations=3)
+        result = opt.run()
+        assert "rsi_period" in result.best_params
+        assert "rsi_oversold" in result.best_params
+        assert "rsi_overbought" in result.best_params
+
+    def test_bollinger_strategy_completes(self):
+        from optimizer import StrategyOptimizer
+        opt = StrategyOptimizer(self._make_df(), "Bollinger Bands", n_iterations=3)
+        result = opt.run()
+        assert "bollinger_period" in result.best_params
+        assert "bollinger_std" in result.best_params
+
+    def test_progress_callback_called(self):
+        from optimizer import StrategyOptimizer
+        calls = []
+        opt = StrategyOptimizer(self._make_df(), "EMA Crossover", n_iterations=4)
+        result = opt.run(progress_callback=lambda i, t, r, p: calls.append(i))
+        assert len(calls) == 4
+
+    def test_all_strategies_have_bounds_defined(self):
+        from optimizer import STRATEGY_PARAM_BOUNDS
+        from trading_agent import STRATEGY_REGISTRY
+        for name in STRATEGY_REGISTRY:
+            assert name in STRATEGY_PARAM_BOUNDS, (
+                f"Strategy '{name}' has no entry in STRATEGY_PARAM_BOUNDS"
+            )
