@@ -228,8 +228,11 @@ def load_data() -> pd.DataFrame:
     else:
         key = ",".join(selected_tickers)
         df = _get_synthetic(key, n_candles)
+    # Ensure Datetime column has a proper datetime dtype regardless of source
+    # (empty DataFrames from failed live fetches carry object-dtype Datetime)
+    df["Datetime"] = pd.to_datetime(df["Datetime"])
     # Apply simulation date cutoff when IS_BACKTEST is enabled
-    if is_backtest:
+    if is_backtest and not df.empty:
         df = df[df["Datetime"].dt.date <= current_date].copy()
     return df
 

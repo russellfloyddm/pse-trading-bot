@@ -509,3 +509,83 @@ class TestBollingerBandStrategy:
         df_signals = agent.run(df_ready)
         valid = {"BUY", "SELL", "HOLD", "HALT"}
         assert set(df_signals["Signal"].unique()).issubset(valid)
+
+
+# ---------------------------------------------------------------------------
+# load_data date-filter regression tests
+# (mirrors the logic in streamlit_app.py::load_data to guard against the
+# AttributeError that occurs when the Datetime column has object dtype)
+# ---------------------------------------------------------------------------
+
+class TestLoadDataDateFilter:
+    """
+    Regression tests for the IS_BACKTEST date-filter logic in load_data().
+
+    When live data fetches fail, fetch_all_tickers returns an empty DataFrame
+    whose Datetime column has object dtype.  Calling .dt.date on an object
+    Series raises AttributeError.  The fix is to call pd.to_datetime() before
+    the filter.  These tests verify that behaviour is correct for both the
+    empty-DataFrame case and the normal populated case.
+    """
+
+    @staticmethod
+    def _apply_backtest_filter(df: pd.DataFrame, cutoff_date) -> pd.DataFrame:
+        """Reproduces the fixed load_data() filter logic."""
+        df = df.copy()
+        df["Datetime"] = pd.to_datetime(df["Datetime"])
+        if not df.empty:
+            df = df[df["Datetime"].dt.date <= cutoff_date].copy()
+        return df
+
+    def test_empty_object_dtype_datetime_does_not_raise(self):
+        """Empty DataFrame with object-dtype Datetime must not raise AttributeError."""
+        empty = pd.DataFrame(
+            columns=["Datetime", "Open", "High", "Low", "Close", "Volume", "Ticker"]
+        )
+        assert empty["Datetime"].dtype == object  # pre-condition: object dtype
+        cutoff = datetime(2026, 2, 19).date()
+        result = self._apply_backtest_filter(empty, cutoff)
+        assert result.empty
+
+    def test_populated_object_dtype_datetime_filters_correctly(self):
+        """Object-dtype Datetime strings must be coerced and filtered correctly."""
+        df = pd.DataFrame({
+            "Datetime": ["2024-01-15 09:30:00", "2024-01-16 09:30:00", "2024-01-17 09:30:00"],
+            "Close": [100.0, 101.0, 102.0],
+            "Ticker": ["BDO.PS"] * 3,
+        })
+        assert df["Datetime"].dtype == object  # pre-condition: object dtype
+        cutoff = datetime(2024, 1, 16).date()
+        result = self._apply_backtest_filter(df, cutoff)
+        assert len(result) == 2
+        assert all(result["Datetime"].dt.date <= cutoff)
+
+    def test_datetime64_dtype_still_works(self):
+        """datetime64 columns (normal synthetic/live path) continue to work."""
+        df = _make_ohlcv_df(n_candles=10)
+        # Confirm the fixture produces datetime64 (or promote it so the test is explicit)
+        df["Datetime"] = pd.to_datetime(df["Datetime"])
+        assert pd.api.types.is_datetime64_any_dtype(df["Datetime"])
+        # Synthetic data starts 2024-01-02 09:30; cutoff 2024-01-15 includes all rows
+        cutoff = datetime(2024, 1, 15).date()
+        result = self._apply_backtest_filter(df, cutoff)
+        assert len(result) == len(df)
+        assert all(result["Datetime"].dt.date <= cutoff)
+
+    def test_backtest_cutoff_excludes_future_rows(self):
+        """Rows after CURRENT_DATE are excluded when IS_BACKTEST is True."""
+        # Build a dataset that spans two calendar days
+        df = pd.DataFrame({
+            "Datetime": [
+                "2024-01-02 09:30:00",  # day 1 — should be kept
+                "2024-01-02 10:00:00",  # day 1 — should be kept
+                "2024-01-03 09:30:00",  # day 2 — should be excluded
+                "2024-01-04 09:30:00",  # day 3 — should be excluded
+            ],
+            "Close": [100.0, 101.0, 102.0, 103.0],
+            "Ticker": ["BDO.PS"] * 4,
+        })
+        cutoff = datetime(2024, 1, 2).date()
+        result = self._apply_backtest_filter(df, cutoff)
+        assert len(result) == 2
+        assert all(result["Datetime"].dt.date <= cutoff)
