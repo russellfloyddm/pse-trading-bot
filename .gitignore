@@ -25,6 +25,9 @@ data/processed/*.parquet
 reports/*.csv
 reports/*.parquet
 
+# AI model checkpoints (large binary files – do not commit trained weights)
+ai_model/checkpoints/
+
 # Logs
 *.log
 
