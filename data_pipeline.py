@@ -101,6 +101,32 @@ def fetch_all_tickers(
     return combined
 
 
+def validate_ticker(ticker: str) -> bool:
+    """Check whether a ticker symbol is valid on Yahoo Finance.
+
+    Makes a lightweight daily data request (last 5 days) to confirm the
+    symbol exists and returns non-empty data.
+
+    Args:
+        ticker: Yahoo Finance ticker symbol (e.g. "BDO.PS", "AAPL").
+
+    Returns:
+        True if the ticker is valid and returns data, False otherwise.
+    """
+    try:
+        raw = yf.download(
+            tickers=ticker,
+            period="5d",
+            interval="1d",
+            auto_adjust=True,
+            progress=False,
+        )
+        return raw is not None and not raw.empty
+    except Exception as exc:
+        logger.warning("Ticker validation failed for %s: %s", ticker, exc)
+        return False
+
+
 def get_latest_candles(
     tickers: list[str] = config.TICKERS,
     interval: str = config.DATA_INTERVAL,
