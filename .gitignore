@@ -37,3 +37,4 @@ reports/*.parquet
 .idea/
 *.swp
 *.swo
+nohup.out
