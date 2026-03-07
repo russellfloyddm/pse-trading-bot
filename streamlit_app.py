@@ -2,9 +2,10 @@
 streamlit_app.py - Streamlit testing interface for the PSE Trading Bot.
 
 Provides an interactive UI to test all major system components:
+  - Trading Simulation (IS_BACKTEST / CURRENT_DATE / STRATEGY)
   - Data Pipeline    (live or synthetic OHLCV data)
   - Indicators       (EMA, RSI, Bollinger Bands)
-  - Trading Signals  (EMA crossover strategy)
+  - Trading Signals  (configurable strategy)
   - Portfolio        (cash, positions, P&L)
   - Backtest         (equity curve, performance metrics)
   - Risk Management  (stop-loss, take-profit, daily loss limit)
@@ -33,7 +34,13 @@ import indicators
 import risk_management as rm
 from backtester import Backtester
 from portfolio import Portfolio
-from trading_agent import EMACrossoverStrategy, TradingAgent
+from trading_agent import (
+    STRATEGY_REGISTRY,
+    BollingerBandStrategy,
+    EMACrossoverStrategy,
+    RSIStrategy,
+    TradingAgent,
+)
 
 # ---------------------------------------------------------------------------
 # App configuration
@@ -54,6 +61,7 @@ logging.basicConfig(level=logging.WARNING)
 
 PAGES = [
     "🏠 Dashboard",
+    "🎮 Trading Simulation",
     "📡 Data Pipeline",
     "📊 Indicators",
     "🤖 Trading Signals",
@@ -177,6 +185,28 @@ with st.sidebar:
         interval = "1m"
 
     st.divider()
+
+    st.subheader("🎮 Simulation Settings")
+    is_backtest = st.toggle(
+        "IS_BACKTEST",
+        value=False,
+        help="When enabled, data is filtered to CURRENT_DATE so the bot acts as if that is today.",
+    )
+    _default_date = datetime(2024, 1, 15).date() if not use_live else datetime.today().date()
+    current_date = st.date_input(
+        "CURRENT_DATE",
+        value=_default_date,
+        help="Acts as the current trading date when IS_BACKTEST is enabled.",
+        disabled=not is_backtest,
+    )
+    strategy_name = st.selectbox(
+        "STRATEGY",
+        list(STRATEGY_REGISTRY.keys()),
+        index=0,
+        help="Trading strategy used for signal generation and backtesting.",
+    )
+
+    st.divider()
     if st.button("🔄 Reset Portfolio", use_container_width=True):
         st.session_state["portfolio"] = Portfolio(config.INITIAL_CAPITAL)
         st.success("Portfolio reset.")
@@ -198,7 +228,15 @@ def load_data() -> pd.DataFrame:
     else:
         key = ",".join(selected_tickers)
         df = _get_synthetic(key, n_candles)
+    # Apply simulation date cutoff when IS_BACKTEST is enabled
+    if is_backtest:
+        df = df[df["Datetime"].dt.date <= current_date].copy()
     return df
+
+
+def _get_strategy():
+    """Return the strategy instance selected in the sidebar."""
+    return STRATEGY_REGISTRY[strategy_name]
 
 
 # ===========================================================================
@@ -258,10 +296,196 @@ if page == PAGES[0]:
 
 
 # ===========================================================================
-# PAGE: Data Pipeline
+# PAGE: Trading Simulation
 # ===========================================================================
 
 elif page == PAGES[1]:
+    st.title("🎮 Trading Simulation")
+
+    # ---- Simulation settings banner ----
+    if is_backtest:
+        st.info(
+            f"📅 **IS_BACKTEST = True** — simulating as of **{current_date}**  "
+            f"| Strategy: **{strategy_name}**  "
+            f"| Data up to and including {current_date} will be used."
+        )
+    else:
+        st.info(
+            f"📅 **IS_BACKTEST = False** — using all available data (live mode)  "
+            f"| Strategy: **{strategy_name}**"
+        )
+
+    st.markdown(
+        "Configure **IS_BACKTEST**, **CURRENT_DATE**, and **STRATEGY** in the sidebar, "
+        "then click **Run Simulation** to see what the bot would do."
+    )
+
+    if st.button("▶ Run Simulation", type="primary"):
+        with st.spinner("Loading data…"):
+            sim_raw = load_data()
+
+        if sim_raw.empty:
+            st.error(
+                "No data available for the selected settings. "
+                "Try a later CURRENT_DATE or switch to synthetic data."
+            )
+            st.stop()
+
+        with st.spinner("Computing indicators…"):
+            sim_ind = indicators.add_indicators(sim_raw)
+
+        portfolio = Portfolio(config.INITIAL_CAPITAL)
+        strategy = _get_strategy()
+        agent = TradingAgent(portfolio, strategy)
+        with st.spinner("Running strategy…"):
+            sim_ready = agent.prepare_signals_df(sim_ind)
+            sim_signals = agent.run(sim_ready)
+
+        # Build equity curve
+        eq_points: list[float] = []
+        for _, grp in sim_signals.groupby("Datetime", sort=True):
+            prices = dict(zip(grp["Ticker"], grp["Close"]))
+            eq_points.append(portfolio.market_value(prices))
+
+        st.session_state["sim_signals"] = sim_signals
+        st.session_state["sim_portfolio"] = portfolio
+        st.session_state["sim_equity"] = eq_points
+        st.session_state["sim_strategy"] = strategy_name
+        st.session_state["sim_date"] = str(current_date) if is_backtest else "live"
+        st.success("Simulation complete!")
+
+    # ---- Results ----
+    sim_signals = st.session_state.get("sim_signals")
+    sim_portfolio: Portfolio | None = st.session_state.get("sim_portfolio")
+
+    if sim_signals is None or sim_portfolio is None:
+        st.info("Configure settings in the sidebar and click **▶ Run Simulation**.")
+        st.stop()
+
+    # Show which settings were used for the cached results
+    _sim_strat_used = st.session_state.get("sim_strategy", "—")
+    _sim_date_used = st.session_state.get("sim_date", "—")
+    st.caption(f"Results: strategy = **{_sim_strat_used}** | data cutoff = **{_sim_date_used}**")
+
+    # --- Market snapshot ---
+    st.divider()
+    st.subheader("📌 Market Snapshot (latest price per ticker)")
+    latest = sim_signals.groupby("Ticker").last()[["Close", "Signal"]].reset_index()
+    latest.columns = ["Ticker", "Latest Close (PHP)", "Latest Signal"]
+    st.dataframe(latest, use_container_width=True, hide_index=True)
+
+    # --- Portfolio summary ---
+    st.divider()
+    st.subheader("💼 Portfolio State")
+    mkt_prices = dict(zip(latest["Ticker"], latest["Latest Close (PHP)"]))
+    summary = sim_portfolio.summary(mkt_prices)
+
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Cash", _format_php(summary["cash"]))
+    s2.metric("Market Value", _format_php(summary["market_value"]))
+    pnl = summary["total_realized_pnl"]
+    s3.metric("Realized P&L", f"{_color_pnl(pnl)} {_format_php(pnl)}")
+    s4.metric("Total Return", f"{summary['total_return_pct']:+.2f}%")
+
+    if summary["open_positions"]:
+        pos_rows = []
+        for ticker, pos in summary["open_positions"].items():
+            current = mkt_prices.get(ticker, pos["avg_cost"])
+            unrealized = (current - pos["avg_cost"]) * pos["shares"]
+            pos_rows.append({
+                "Ticker": ticker,
+                "Shares": f"{pos['shares']:.0f}",
+                "Avg Cost": _format_php(pos["avg_cost"]),
+                "Current": _format_php(current),
+                "Unrealized P&L": _format_php(unrealized),
+            })
+        st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No open positions.")
+
+    # --- Equity curve ---
+    eq_points = st.session_state.get("sim_equity", [])
+    if eq_points:
+        st.divider()
+        st.subheader("📈 Equity Curve")
+        eq_df = pd.DataFrame({"Candle": range(len(eq_points)), "Portfolio Value (PHP)": eq_points})
+        fig_eq = px.line(eq_df, x="Candle", y="Portfolio Value (PHP)", title="Portfolio Value Over Time")
+        fig_eq.add_hline(
+            y=config.INITIAL_CAPITAL, line_dash="dash", line_color="grey",
+            annotation_text="Initial Capital",
+        )
+        st.plotly_chart(fig_eq, use_container_width=True)
+
+    # --- Signal chart (per ticker) ---
+    st.divider()
+    st.subheader("🤖 Signals Chart")
+    unique_tickers = sorted(sim_signals["Ticker"].unique())
+    chart_ticker = st.selectbox("Select Ticker", unique_tickers, key="sim_chart_ticker")
+    t_df = sim_signals[sim_signals["Ticker"] == chart_ticker].copy()
+    buys = t_df[t_df["Signal"] == "BUY"]
+    sells = t_df[t_df["Signal"] == "SELL"]
+
+    fast_col = f"EMA_{config.EMA_FAST}"
+    slow_col = f"EMA_{config.EMA_SLOW}"
+
+    fig_sig = go.Figure()
+    fig_sig.add_trace(go.Scatter(
+        x=t_df["Datetime"], y=t_df["Close"], name="Close",
+        line=dict(color="royalblue", width=1),
+    ))
+    if fast_col in t_df.columns:
+        fig_sig.add_trace(go.Scatter(
+            x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {config.EMA_FAST}",
+            line=dict(color="orange", width=1.5, dash="dash"),
+        ))
+    if slow_col in t_df.columns:
+        fig_sig.add_trace(go.Scatter(
+            x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {config.EMA_SLOW}",
+            line=dict(color="red", width=1.5, dash="dash"),
+        ))
+    if "BB_upper" in t_df.columns:
+        fig_sig.add_trace(go.Scatter(
+            x=t_df["Datetime"], y=t_df["BB_upper"], name="BB Upper",
+            line=dict(color="grey", width=1, dash="dot"),
+        ))
+        fig_sig.add_trace(go.Scatter(
+            x=t_df["Datetime"], y=t_df["BB_lower"], name="BB Lower",
+            line=dict(color="grey", width=1, dash="dot"),
+            fill="tonexty", fillcolor="rgba(150,150,150,0.1)",
+        ))
+    if not buys.empty:
+        fig_sig.add_trace(go.Scatter(
+            x=buys["Datetime"], y=buys["Close"], mode="markers", name="BUY",
+            marker=dict(symbol="triangle-up", color="green", size=12),
+        ))
+    if not sells.empty:
+        fig_sig.add_trace(go.Scatter(
+            x=sells["Datetime"], y=sells["Close"], mode="markers", name="SELL",
+            marker=dict(symbol="triangle-down", color="red", size=12),
+        ))
+    fig_sig.update_layout(
+        title=f"{chart_ticker} – {_sim_strat_used} Signals",
+        height=450, xaxis_title="Datetime", yaxis_title="Price (PHP)",
+        legend=dict(orientation="h"),
+    )
+    st.plotly_chart(fig_sig, use_container_width=True)
+
+    # --- Trade log ---
+    st.divider()
+    st.subheader("📋 Trade Log")
+    trade_df = sim_portfolio.to_trade_log_df()
+    if trade_df.empty:
+        st.info("No trades were executed during this simulation.")
+    else:
+        st.metric("Total Trades", len(trade_df))
+        st.dataframe(trade_df, use_container_width=True)
+
+
+# ===========================================================================
+# PAGE: Data Pipeline
+# ===========================================================================
+
+elif page == PAGES[2]:
     st.title("📡 Data Pipeline")
     st.markdown(
         "Fetch or generate OHLCV market data for the selected tickers. "
@@ -328,7 +552,7 @@ elif page == PAGES[1]:
 # PAGE: Indicators
 # ===========================================================================
 
-elif page == PAGES[2]:
+elif page == PAGES[3]:
     st.title("📊 Indicators")
     st.markdown(
         "Compute technical indicators (EMA, RSI, Bollinger Bands, Returns, "
@@ -401,12 +625,11 @@ elif page == PAGES[2]:
 # PAGE: Trading Signals
 # ===========================================================================
 
-elif page == PAGES[3]:
+elif page == PAGES[4]:
     st.title("🤖 Trading Signals")
     st.markdown(
-        "Run the EMA crossover trading agent on market data. "
-        "BUY signals appear when the fast EMA crosses above the slow EMA "
-        "(golden cross), and SELL signals appear on the death cross."
+        "Run the trading agent on market data. "
+        "BUY / SELL signals are generated by the **STRATEGY** selected in the sidebar."
     )
 
     raw_df = st.session_state.get("raw_df")
@@ -423,13 +646,14 @@ elif page == PAGES[3]:
 
     if st.button("▶ Generate Signals", type="primary"):
         portfolio = Portfolio(config.INITIAL_CAPITAL)
-        agent = TradingAgent(portfolio, EMACrossoverStrategy())
+        agent = TradingAgent(portfolio, _get_strategy())
         with st.spinner("Running trading agent…"):
             ready_df = agent.prepare_signals_df(ind_df)
             signals_df = agent.run(ready_df)
         st.session_state["signals_df"] = signals_df
         st.session_state["signal_portfolio"] = portfolio
-        st.success("Signals generated!")
+        st.session_state["signals_strategy"] = strategy_name
+        st.success(f"Signals generated using **{strategy_name}**!")
 
     signals_df = st.session_state.get("signals_df")
     if signals_df is None:
@@ -456,8 +680,14 @@ elif page == PAGES[3]:
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["Close"], name="Close", line=dict(color="royalblue", width=1)))
-    fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {config.EMA_FAST}", line=dict(color="orange", width=1.5, dash="dash")))
-    fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {config.EMA_SLOW}", line=dict(color="red", width=1.5, dash="dash")))
+    if fast_col in t_df.columns:
+        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[fast_col], name=f"EMA {config.EMA_FAST}", line=dict(color="orange", width=1.5, dash="dash")))
+    if slow_col in t_df.columns:
+        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df[slow_col], name=f"EMA {config.EMA_SLOW}", line=dict(color="red", width=1.5, dash="dash")))
+    if "BB_upper" in t_df.columns and st.session_state.get("signals_strategy") in ("Bollinger Bands", None):
+        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["BB_upper"], name="BB Upper", line=dict(color="grey", width=1, dash="dot")))
+        fig.add_trace(go.Scatter(x=t_df["Datetime"], y=t_df["BB_lower"], name="BB Lower", line=dict(color="grey", width=1, dash="dot"),
+                                 fill="tonexty", fillcolor="rgba(150,150,150,0.1)"))
     if not buys.empty:
         fig.add_trace(go.Scatter(
             x=buys["Datetime"], y=buys["Close"],
@@ -470,8 +700,9 @@ elif page == PAGES[3]:
             mode="markers", name="SELL",
             marker=dict(symbol="triangle-down", color="red", size=12),
         ))
+    used_strategy = st.session_state.get("signals_strategy", strategy_name)
     fig.update_layout(
-        title=f"{chart_ticker} – Signals",
+        title=f"{chart_ticker} – {used_strategy} Signals",
         height=450,
         xaxis_title="Datetime",
         yaxis_title="Price (PHP)",
@@ -481,7 +712,10 @@ elif page == PAGES[3]:
 
     st.divider()
     st.subheader("Signal DataFrame (first 100 rows)")
-    sig_cols = ["Datetime", "Ticker", "Close", fast_col, slow_col, "Signal"]
+    sig_cols = ["Datetime", "Ticker", "Close", "Signal"]
+    for col in [fast_col, slow_col, "RSI", "BB_upper", "BB_lower"]:
+        if col in signals_df.columns:
+            sig_cols.append(col)
     st.dataframe(signals_df[sig_cols].head(100), use_container_width=True)
 
 
@@ -489,7 +723,7 @@ elif page == PAGES[3]:
 # PAGE: Portfolio
 # ===========================================================================
 
-elif page == PAGES[4]:
+elif page == PAGES[5]:
     st.title("💼 Portfolio")
     st.markdown(
         "Inspect the virtual portfolio state. The portfolio is shared with the "
@@ -587,11 +821,11 @@ elif page == PAGES[4]:
 # PAGE: Backtest
 # ===========================================================================
 
-elif page == PAGES[5]:
+elif page == PAGES[6]:
     st.title("🔬 Backtest")
     st.markdown(
         "Run a full historical backtest on the loaded market data using the "
-        "EMA crossover strategy. Results include performance metrics and an "
+        "**STRATEGY** selected in the sidebar. Results include performance metrics and an "
         "equity curve."
     )
 
@@ -618,10 +852,10 @@ elif page == PAGES[5]:
 
     if st.button("▶ Run Backtest", type="primary"):
         with st.spinner("Running backtest…"):
-            bt = Backtester(initial_capital=initial_capital)
+            bt = Backtester(initial_capital=initial_capital, strategy=_get_strategy())
             metrics = bt.run(ind_df)
         st.session_state["bt_metrics"] = metrics
-        st.success("Backtest complete!")
+        st.success(f"Backtest complete using **{strategy_name}**!")
 
     metrics = st.session_state.get("bt_metrics")
     if metrics is None:
@@ -683,7 +917,7 @@ elif page == PAGES[5]:
 # PAGE: Risk Management
 # ===========================================================================
 
-elif page == PAGES[6]:
+elif page == PAGES[7]:
     st.title("⚠️ Risk Management")
     st.markdown(
         "Interactively test the risk management functions: position sizing, "

@@ -30,6 +30,7 @@ from risk_management import (
     compute_position_size,
 )
 from trading_agent import EMACrossoverStrategy, TradingAgent
+from trading_agent import RSIStrategy, BollingerBandStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -364,3 +365,147 @@ class TestBacktesterMetrics:
         # Equity curve should have one entry per unique Datetime
         n_timestamps = df["Datetime"].nunique()
         assert len(metrics["equity_curve"]) == n_timestamps
+
+
+# ---------------------------------------------------------------------------
+# RSIStrategy tests
+# ---------------------------------------------------------------------------
+
+class TestRSIStrategy:
+    def _make_rsi_row(self, rsi: float, prev_rsi: float) -> pd.Series:
+        return pd.Series({"RSI": rsi, "prev_RSI": prev_rsi})
+
+    def test_buy_signal_on_oversold_recovery(self):
+        strategy = RSIStrategy(oversold=30, overbought=70)
+        row = self._make_rsi_row(rsi=31.0, prev_rsi=29.0)  # crosses back above 30
+        assert strategy.generate_signal(row, "BDO.PS") == "BUY"
+
+    def test_sell_signal_on_overbought_retreat(self):
+        strategy = RSIStrategy(oversold=30, overbought=70)
+        row = self._make_rsi_row(rsi=69.0, prev_rsi=71.0)  # crosses back below 70
+        assert strategy.generate_signal(row, "BDO.PS") == "SELL"
+
+    def test_hold_signal_no_crossover(self):
+        strategy = RSIStrategy(oversold=30, overbought=70)
+        row = self._make_rsi_row(rsi=50.0, prev_rsi=49.0)
+        assert strategy.generate_signal(row, "BDO.PS") == "HOLD"
+
+    def test_hold_signal_nan_values(self):
+        strategy = RSIStrategy()
+        row = self._make_rsi_row(rsi=float("nan"), prev_rsi=29.0)
+        assert strategy.generate_signal(row, "BDO.PS") == "HOLD"
+
+    def test_hold_signal_missing_column(self):
+        strategy = RSIStrategy()
+        row = pd.Series({"RSI": 31.0})  # prev_RSI missing
+        assert strategy.generate_signal(row, "BDO.PS") == "HOLD"
+
+    def test_lag_columns(self):
+        assert RSIStrategy().lag_columns == ["RSI"]
+
+    def test_prepare_signals_df_adds_prev_rsi(self):
+        p = Portfolio(1_000_000)
+        agent = TradingAgent(p, RSIStrategy())
+        df = _make_ohlcv_df(n_candles=50)
+        df_ind = indicators.add_indicators(df)
+        df_ready = agent.prepare_signals_df(df_ind)
+        assert "prev_RSI" in df_ready.columns
+
+    def test_agent_with_rsi_strategy_signals_valid(self):
+        p = Portfolio(1_000_000)
+        agent = TradingAgent(p, RSIStrategy())
+        df = _make_ohlcv_df(n_candles=50)
+        df_ind = indicators.add_indicators(df)
+        df_ready = agent.prepare_signals_df(df_ind)
+        df_signals = agent.run(df_ready)
+        valid = {"BUY", "SELL", "HOLD", "HALT"}
+        assert set(df_signals["Signal"].unique()).issubset(valid)
+
+
+# ---------------------------------------------------------------------------
+# BollingerBandStrategy tests
+# ---------------------------------------------------------------------------
+
+class TestBollingerBandStrategy:
+    def _make_bb_row(
+        self,
+        close: float,
+        prev_close: float,
+        bb_upper: float,
+        bb_lower: float,
+        prev_bb_upper: float,
+        prev_bb_lower: float,
+    ) -> pd.Series:
+        return pd.Series({
+            "Close": close,
+            "prev_Close": prev_close,
+            "BB_upper": bb_upper,
+            "BB_lower": bb_lower,
+            "prev_BB_upper": prev_bb_upper,
+            "prev_BB_lower": prev_bb_lower,
+        })
+
+    def test_buy_signal_on_lower_band_recovery(self):
+        strategy = BollingerBandStrategy()
+        # prev_close below lower band, close crosses back above it
+        row = self._make_bb_row(
+            close=99.0, prev_close=98.0,
+            bb_upper=110.0, bb_lower=99.0,
+            prev_bb_upper=110.0, prev_bb_lower=99.0,
+        )
+        assert strategy.generate_signal(row, "BDO.PS") == "BUY"
+
+    def test_sell_signal_on_upper_band_retreat(self):
+        strategy = BollingerBandStrategy()
+        # prev_close above upper band, close crosses back below it
+        row = self._make_bb_row(
+            close=110.0, prev_close=111.0,
+            bb_upper=110.0, bb_lower=90.0,
+            prev_bb_upper=110.0, prev_bb_lower=90.0,
+        )
+        assert strategy.generate_signal(row, "BDO.PS") == "SELL"
+
+    def test_hold_signal_inside_bands(self):
+        strategy = BollingerBandStrategy()
+        row = self._make_bb_row(
+            close=100.0, prev_close=100.0,
+            bb_upper=110.0, bb_lower=90.0,
+            prev_bb_upper=110.0, prev_bb_lower=90.0,
+        )
+        assert strategy.generate_signal(row, "BDO.PS") == "HOLD"
+
+    def test_hold_signal_nan_values(self):
+        strategy = BollingerBandStrategy()
+        row = self._make_bb_row(
+            close=float("nan"), prev_close=98.0,
+            bb_upper=110.0, bb_lower=99.0,
+            prev_bb_upper=110.0, prev_bb_lower=99.0,
+        )
+        assert strategy.generate_signal(row, "BDO.PS") == "HOLD"
+
+    def test_hold_signal_missing_column(self):
+        strategy = BollingerBandStrategy()
+        row = pd.Series({"Close": 100.0, "BB_upper": 110.0})  # many columns missing
+        assert strategy.generate_signal(row, "BDO.PS") == "HOLD"
+
+    def test_lag_columns(self):
+        assert BollingerBandStrategy().lag_columns == ["Close", "BB_upper", "BB_lower"]
+
+    def test_prepare_signals_df_adds_prev_bb_columns(self):
+        p = Portfolio(1_000_000)
+        agent = TradingAgent(p, BollingerBandStrategy())
+        df = _make_ohlcv_df(n_candles=50)
+        df_ind = indicators.add_indicators(df)
+        df_ready = agent.prepare_signals_df(df_ind)
+        for col in ["prev_Close", "prev_BB_upper", "prev_BB_lower"]:
+            assert col in df_ready.columns, f"Missing column: {col}"
+
+    def test_agent_with_bb_strategy_signals_valid(self):
+        p = Portfolio(1_000_000)
+        agent = TradingAgent(p, BollingerBandStrategy())
+        df = _make_ohlcv_df(n_candles=50)
+        df_ind = indicators.add_indicators(df)
+        df_ready = agent.prepare_signals_df(df_ind)
+        df_signals = agent.run(df_ready)
+        valid = {"BUY", "SELL", "HOLD", "HALT"}
+        assert set(df_signals["Signal"].unique()).issubset(valid)
