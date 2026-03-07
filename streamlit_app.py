@@ -525,6 +525,43 @@ elif page == PAGES[1]:
         st.metric("Total Trades", len(trade_df))
         st.dataframe(trade_df, use_container_width=True)
 
+    # --- Decision log ---
+    st.divider()
+    st.subheader("📊 Decision Log")
+    st.markdown(
+        "Every candle in the simulation window with its strategy decision and "
+        "key indicator values. Use this table to verify the bot's behaviour "
+        "even when no trades were executed."
+    )
+
+    # Strategy-specific indicator columns to display alongside the signal
+    _strategy_indicator_cols: dict[str, list[str]] = {
+        "EMA Crossover": [f"EMA_{config.EMA_FAST}", f"EMA_{config.EMA_SLOW}"],
+        "RSI Mean-Reversion": ["RSI"],
+        "Bollinger Bands": ["BB_upper", "BB_middle", "BB_lower"],
+    }
+    _indicator_cols = _strategy_indicator_cols.get(_sim_strat_used, [])
+    _base_cols = ["Datetime", "Ticker", "Close", "Signal"]
+    _display_cols = _base_cols + [c for c in _indicator_cols if c in sim_signals.columns]
+
+    decision_log = sim_signals[_display_cols].copy()
+    decision_log = decision_log.sort_values(["Datetime", "Ticker"]).reset_index(drop=True)
+
+    # Summary counts
+    _n_buy = int((decision_log["Signal"] == "BUY").sum())
+    _n_sell = int((decision_log["Signal"] == "SELL").sum())
+    _n_hold = int((decision_log["Signal"] == "HOLD").sum())
+    _n_halt = int((decision_log["Signal"] == "HALT").sum())
+
+    dl1, dl2, dl3, dl4, dl5 = st.columns(5)
+    dl1.metric("Total Candles", f"{len(decision_log):,}")
+    dl2.metric("🟢 BUY", _n_buy)
+    dl3.metric("🔴 SELL", _n_sell)
+    dl4.metric("⚪ HOLD", _n_hold)
+    dl5.metric("🛑 HALT", _n_halt)
+
+    st.dataframe(decision_log, use_container_width=True, hide_index=True)
+
 
 # ===========================================================================
 # PAGE: Data Pipeline
