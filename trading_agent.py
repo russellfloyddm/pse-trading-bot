@@ -1,9 +1,19 @@
 """
 trading_agent.py - Trading strategy implementation for the PSE Trading Bot.
 
-Currently implements a rule-based EMA crossover strategy.  The design is
-intentionally extensible so that AI/ML strategies can be plugged in later by
+Implements three rule-based strategies and provides an extensible base class
+so that additional strategies (including AI/ML models) can be plugged in by
 subclassing ``BaseStrategy``.
+
+Strategies
+----------
+* :class:`EMACrossoverStrategy` – Golden / death cross on fast and slow EMAs.
+* :class:`RSIStrategy` – Mean-reversion entries via RSI threshold crossovers.
+* :class:`BollingerBandStrategy` – Mean-reversion entries via Bollinger Band
+  crossovers.
+
+The :data:`STRATEGY_REGISTRY` mapping provides a convenient way to look up a
+strategy instance by its human-readable name.
 """
 
 import logging
@@ -29,7 +39,22 @@ class BaseStrategy(ABC):
     """Abstract base class for trading strategies.
 
     Subclass this and implement :meth:`generate_signal` to add new strategies.
+    Override :attr:`lag_columns` to declare which indicator columns need a
+    one-period lag added by :meth:`TradingAgent.prepare_signals_df`.
     """
+
+    @property
+    def lag_columns(self) -> list[str]:
+        """Indicator column names that require a one-period lag.
+
+        :meth:`TradingAgent.prepare_signals_df` shifts each column listed here
+        and stores the result in a ``prev_<col>`` column so that crossover
+        detection works correctly.
+
+        Returns:
+            List of column name strings (default: empty list).
+        """
+        return []
 
     @abstractmethod
     def generate_signal(self, row: pd.Series, ticker: str) -> Signal:
@@ -69,6 +94,10 @@ class EMACrossoverStrategy(BaseStrategy):
     ) -> None:
         self.fast_col = f"EMA_{fast_period}"
         self.slow_col = f"EMA_{slow_period}"
+
+    @property
+    def lag_columns(self) -> list[str]:
+        return [self.fast_col, self.slow_col]
 
     def generate_signal(self, row: pd.Series, ticker: str) -> Signal:
         """Generate a signal based on EMA crossover.
@@ -110,6 +139,145 @@ class EMACrossoverStrategy(BaseStrategy):
 
 
 # ---------------------------------------------------------------------------
+# RSI mean-reversion strategy
+# ---------------------------------------------------------------------------
+
+class RSIStrategy(BaseStrategy):
+    """RSI mean-reversion strategy.
+
+    **BUY**  when the RSI crosses back *above* the oversold threshold
+             (price recovering from an oversold dip).
+    **SELL** when the RSI crosses back *below* the overbought threshold
+             (price retreating from an overbought peak).
+    **HOLD** otherwise.
+
+    Args:
+        oversold: RSI level considered oversold (default: RSI_OVERSOLD from config).
+        overbought: RSI level considered overbought (default: RSI_OVERBOUGHT from config).
+    """
+
+    def __init__(
+        self,
+        oversold: float = config.RSI_OVERSOLD,
+        overbought: float = config.RSI_OVERBOUGHT,
+    ) -> None:
+        self.oversold = oversold
+        self.overbought = overbought
+
+    @property
+    def lag_columns(self) -> list[str]:
+        return ["RSI"]
+
+    def generate_signal(self, row: pd.Series, ticker: str) -> Signal:
+        """Generate a signal based on RSI threshold crossovers.
+
+        Requires columns *RSI* and *prev_RSI*.  Falls back to HOLD if any
+        column is missing or NaN.
+
+        Args:
+            row: Current candle row.
+            ticker: Ticker symbol (used for logging).
+
+        Returns:
+            "BUY", "SELL", or "HOLD".
+        """
+        try:
+            rsi_val = row["RSI"]
+            prev_rsi = row["prev_RSI"]
+        except KeyError:
+            return "HOLD"
+
+        if any(pd.isna(v) for v in [rsi_val, prev_rsi]):
+            return "HOLD"
+
+        # Recovery from oversold: RSI crosses back above the oversold threshold
+        if prev_rsi <= self.oversold < rsi_val:
+            logger.debug("BUY signal for %s (RSI recovery: %.1f → %.1f)", ticker, prev_rsi, rsi_val)
+            return "BUY"
+
+        # Retreat from overbought: RSI crosses back below the overbought threshold
+        if prev_rsi >= self.overbought > rsi_val:
+            logger.debug("SELL signal for %s (RSI retreat: %.1f → %.1f)", ticker, prev_rsi, rsi_val)
+            return "SELL"
+
+        return "HOLD"
+
+
+# ---------------------------------------------------------------------------
+# Bollinger Bands mean-reversion strategy
+# ---------------------------------------------------------------------------
+
+class BollingerBandStrategy(BaseStrategy):
+    """Bollinger Bands mean-reversion strategy.
+
+    **BUY**  when the Close price crosses back *above* the lower Bollinger Band
+             (price recovering from an oversold dip below the band).
+    **SELL** when the Close price crosses back *below* the upper Bollinger Band
+             (price retreating from an overbought peak above the band).
+    **HOLD** otherwise.
+    """
+
+    @property
+    def lag_columns(self) -> list[str]:
+        return ["Close", "BB_upper", "BB_lower"]
+
+    def generate_signal(self, row: pd.Series, ticker: str) -> Signal:
+        """Generate a signal based on Bollinger Band crossovers.
+
+        Requires columns *Close*, *BB_upper*, *BB_lower* and their ``prev_``
+        counterparts.  Falls back to HOLD if any column is missing or NaN.
+
+        Args:
+            row: Current candle row.
+            ticker: Ticker symbol (used for logging).
+
+        Returns:
+            "BUY", "SELL", or "HOLD".
+        """
+        try:
+            close = row["Close"]
+            bb_upper = row["BB_upper"]
+            bb_lower = row["BB_lower"]
+            prev_close = row["prev_Close"]
+            prev_bb_upper = row["prev_BB_upper"]
+            prev_bb_lower = row["prev_BB_lower"]
+        except KeyError:
+            return "HOLD"
+
+        if any(pd.isna(v) for v in [close, bb_upper, bb_lower, prev_close, prev_bb_upper, prev_bb_lower]):
+            return "HOLD"
+
+        # Recovery: close was below the lower band and crosses back above it
+        if prev_close < prev_bb_lower and close >= bb_lower:
+            logger.debug(
+                "BUY signal for %s (BB recovery: %.4f → %.4f, lower=%.4f)",
+                ticker, prev_close, close, bb_lower,
+            )
+            return "BUY"
+
+        # Retreat: close was above the upper band and crosses back below it
+        if prev_close > prev_bb_upper and close <= bb_upper:
+            logger.debug(
+                "SELL signal for %s (BB retreat: %.4f → %.4f, upper=%.4f)",
+                ticker, prev_close, close, bb_upper,
+            )
+            return "SELL"
+
+        return "HOLD"
+
+
+# ---------------------------------------------------------------------------
+# Strategy registry – maps display name → strategy instance
+# ---------------------------------------------------------------------------
+
+STRATEGY_REGISTRY: dict[str, BaseStrategy] = {
+    "EMA Crossover": EMACrossoverStrategy(),
+    "RSI Mean-Reversion": RSIStrategy(),
+    "Bollinger Bands": BollingerBandStrategy(),
+}
+
+
+# ---------------------------------------------------------------------------
 # Trading agent – wraps strategy + risk management
 # ---------------------------------------------------------------------------
 
@@ -134,28 +302,35 @@ class TradingAgent:
     # ------------------------------------------------------------------
 
     def prepare_signals_df(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add lagged EMA columns required by the EMA crossover strategy.
+        """Add lagged columns required by the active strategy.
 
-        Groups by ticker, sorts by Datetime, and adds *prev_EMA_fast* and
-        *prev_EMA_slow* shift columns.
+        Reads :attr:`BaseStrategy.lag_columns` from the current strategy and
+        shifts each listed column by one period (per-ticker) to produce
+        ``prev_<col>`` columns used for crossover detection.
 
         Args:
             df: Processed DataFrame with indicator columns.
 
         Returns:
-            DataFrame with additional *prev_* columns.
+            DataFrame with additional ``prev_`` columns for each lag column.
         """
-        fast_col = f"EMA_{config.EMA_FAST}"
-        slow_col = f"EMA_{config.EMA_SLOW}"
-        if fast_col not in df.columns or slow_col not in df.columns:
-            logger.warning("EMA columns missing – run indicators.add_indicators() first.")
+        lag_cols = self.strategy.lag_columns
+        if not lag_cols:
+            return df
+
+        missing = [c for c in lag_cols if c not in df.columns]
+        if missing:
+            logger.warning(
+                "Columns missing for strategy lag: %s – run indicators.add_indicators() first.",
+                missing,
+            )
             return df
 
         out_frames = []
         for _, group in df.groupby("Ticker", sort=False):
             g = group.sort_values("Datetime").copy()
-            g[f"prev_{fast_col}"] = g[fast_col].shift(1)
-            g[f"prev_{slow_col}"] = g[slow_col].shift(1)
+            for col in lag_cols:
+                g[f"prev_{col}"] = g[col].shift(1)
             out_frames.append(g)
 
         result = pd.concat(out_frames, ignore_index=True)
@@ -214,7 +389,7 @@ class TradingAgent:
             if final_signal == "BUY" and ticker not in self.portfolio.positions:
                 shares = rm.compute_position_size(self.portfolio.cash, price)
                 if shares > 0:
-                    self.portfolio.buy(ticker, shares, price, ts, notes="EMA crossover")
+                    self.portfolio.buy(ticker, shares, price, ts, notes=type(self.strategy).__name__)
 
             elif final_signal == "SELL" and ticker in self.portfolio.positions:
                 pos = self.portfolio.positions[ticker]
