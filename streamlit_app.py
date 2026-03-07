@@ -132,7 +132,21 @@ def _fetch_live_data(tickers: tuple[str, ...], period: str, interval: str) -> pd
     """Cached wrapper around data_pipeline.fetch_all_tickers."""
     from data_pipeline import fetch_all_tickers
 
-    return fetch_all_tickers(tickers=tickers, period=period, interval=interval)
+    return fetch_all_tickers(tickers=list(tickers), period=period, interval=interval)
+
+
+@st.cache_data(show_spinner="Fetching live market data for backtest window…")
+def _fetch_live_data_range(tickers: tuple[str, ...], start_date, end_date, interval: str) -> pd.DataFrame:
+    """Cached wrapper around data_pipeline.fetch_all_tickers_range.
+
+    Uses explicit start/end dates so the full backtest window is always
+    covered, regardless of how many calendar days ago it started.
+    """
+    from data_pipeline import fetch_all_tickers_range
+
+    return fetch_all_tickers_range(
+        tickers=list(tickers), start_date=start_date, end_date=end_date, interval=interval
+    )
 
 
 def _format_php(value: float) -> str:
@@ -205,13 +219,6 @@ with st.sidebar:
         disabled=use_live,
     )
 
-    if use_live:
-        period = st.selectbox("Period", ["1d", "2d", "5d"], index=0)
-        interval = st.selectbox("Interval", ["1m", "5m", "15m"], index=0)
-    else:
-        period = "synthetic"
-        interval = "1m"
-
     st.divider()
 
     st.subheader("🎮 Simulation Settings")
@@ -242,6 +249,24 @@ with st.sidebar:
     )
 
     st.divider()
+
+    if use_live:
+        period = st.selectbox(
+            "Period",
+            ["1d", "2d", "5d", "7d"],
+            index=0,
+            disabled=is_backtest,
+            help=(
+                "Look-back period for live data. Disabled when IS_BACKTEST is "
+                "enabled — the full START_DATE → END_DATE window is fetched automatically."
+            ),
+        )
+        interval = st.selectbox("Interval", ["1m", "5m", "15m", "30m", "1h"], index=0)
+    else:
+        period = "synthetic"
+        interval = "1m"
+
+    st.divider()
     if st.button("🔄 Reset Portfolio", use_container_width=True):
         st.session_state["portfolio"] = Portfolio(config.INITIAL_CAPITAL)
         st.success("Portfolio reset.")
@@ -259,7 +284,12 @@ def _get_synthetic(tickers_key: str, n: int) -> pd.DataFrame:
 
 def load_data() -> pd.DataFrame:
     if use_live:
-        df = _fetch_live_data(tuple(selected_tickers), period, interval)
+        if is_backtest:
+            # Use explicit date-range fetch so the full START_DATE→END_DATE
+            # window is retrieved regardless of the relative-period cap.
+            df = _fetch_live_data_range(tuple(selected_tickers), start_date, end_date, interval)
+        else:
+            df = _fetch_live_data(tuple(selected_tickers), period, interval)
     else:
         key = ",".join(selected_tickers)
         df = _get_synthetic(key, n_candles)
