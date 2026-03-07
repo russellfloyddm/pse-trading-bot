@@ -218,13 +218,20 @@ with st.sidebar:
     is_backtest = st.toggle(
         "IS_BACKTEST",
         value=False,
-        help="When enabled, data is filtered to CURRENT_DATE so the bot acts as if that is today.",
+        help="When enabled, data is filtered to the START_DATE – END_DATE window for simulation.",
     )
-    _default_date = datetime(2024, 1, 15).date() if not use_live else datetime.today().date()
-    current_date = st.date_input(
-        "CURRENT_DATE",
-        value=_default_date,
-        help="Acts as the current trading date when IS_BACKTEST is enabled.",
+    _default_end = datetime(2024, 1, 15).date() if not use_live else datetime.today().date()
+    _default_start = (datetime(2024, 1, 15) - timedelta(days=7)).date() if not use_live else (datetime.today() - timedelta(days=7)).date()
+    start_date = st.date_input(
+        "START_DATE",
+        value=_default_start,
+        help="Simulation start date (inclusive). Only used when IS_BACKTEST is enabled.",
+        disabled=not is_backtest,
+    )
+    end_date = st.date_input(
+        "END_DATE",
+        value=_default_end,
+        help="Simulation end date (inclusive). Only used when IS_BACKTEST is enabled.",
         disabled=not is_backtest,
     )
     strategy_name = st.selectbox(
@@ -259,9 +266,12 @@ def load_data() -> pd.DataFrame:
     # Ensure Datetime column has a proper datetime dtype regardless of source
     # (empty DataFrames from failed live fetches carry object-dtype Datetime)
     df["Datetime"] = pd.to_datetime(df["Datetime"])
-    # Apply simulation date cutoff when IS_BACKTEST is enabled
+    # Apply simulation date range when IS_BACKTEST is enabled
     if is_backtest and not df.empty:
-        df = df[df["Datetime"].dt.date <= current_date].copy()
+        df = df[
+            (df["Datetime"].dt.date >= start_date) &
+            (df["Datetime"].dt.date <= end_date)
+        ].copy()
     return df
 
 
@@ -340,9 +350,9 @@ elif page == PAGES[1]:
     # ---- Simulation settings banner ----
     if is_backtest:
         st.info(
-            f"📅 **IS_BACKTEST = True** — simulating as of **{current_date}**  "
+            f"📅 **IS_BACKTEST = True** — simulating from **{start_date}** to **{end_date}**  "
             f"| Strategy: **{strategy_name}**  "
-            f"| Data up to and including {current_date} will be used."
+            f"| Data between {start_date} and {end_date} (inclusive) will be used."
         )
     else:
         st.info(
@@ -351,7 +361,7 @@ elif page == PAGES[1]:
         )
 
     st.markdown(
-        "Configure **IS_BACKTEST**, **CURRENT_DATE**, and **STRATEGY** in the sidebar, "
+        "Configure **IS_BACKTEST**, **START_DATE**, **END_DATE**, and **STRATEGY** in the sidebar, "
         "then click **Run Simulation** to see what the bot would do."
     )
 
@@ -362,7 +372,7 @@ elif page == PAGES[1]:
         if sim_raw.empty:
             st.error(
                 "No data available for the selected settings. "
-                "Try a later CURRENT_DATE or switch to synthetic data."
+                "Try adjusting START_DATE / END_DATE or switch to synthetic data."
             )
             st.stop()
 
@@ -386,7 +396,7 @@ elif page == PAGES[1]:
         st.session_state["sim_portfolio"] = portfolio
         st.session_state["sim_equity"] = eq_points
         st.session_state["sim_strategy"] = strategy_name
-        st.session_state["sim_date"] = str(current_date) if is_backtest else "live"
+        st.session_state["sim_date"] = f"{start_date} → {end_date}" if is_backtest else "live"
         st.success("Simulation complete!")
 
     # ---- Results ----
@@ -400,7 +410,7 @@ elif page == PAGES[1]:
     # Show which settings were used for the cached results
     _sim_strat_used = st.session_state.get("sim_strategy", "—")
     _sim_date_used = st.session_state.get("sim_date", "—")
-    st.caption(f"Results: strategy = **{_sim_strat_used}** | data cutoff = **{_sim_date_used}**")
+    st.caption(f"Results: strategy = **{_sim_strat_used}** | date range = **{_sim_date_used}**")
 
     # --- Market snapshot ---
     st.divider()

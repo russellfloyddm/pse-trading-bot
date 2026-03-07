@@ -592,6 +592,157 @@ class TestLoadDataDateFilter:
 
 
 # ---------------------------------------------------------------------------
+# load_data date-range filter tests (START_DATE + END_DATE)
+# ---------------------------------------------------------------------------
+
+class TestLoadDataDateRangeFilter:
+    """
+    Tests for the IS_BACKTEST START_DATE / END_DATE range filter in load_data().
+
+    When IS_BACKTEST = True the bot should only process candles whose date
+    falls within [start_date, end_date] (both inclusive).
+    """
+
+    @staticmethod
+    def _apply_range_filter(df: pd.DataFrame, start_date, end_date) -> pd.DataFrame:
+        """Reproduces the load_data() range-filter logic."""
+        df = df.copy()
+        df["Datetime"] = pd.to_datetime(df["Datetime"])
+        if not df.empty:
+            df = df[
+                (df["Datetime"].dt.date >= start_date) &
+                (df["Datetime"].dt.date <= end_date)
+            ].copy()
+        return df
+
+    def test_empty_dataframe_does_not_raise(self):
+        """Empty DataFrame with object-dtype Datetime must not raise AttributeError."""
+        empty = pd.DataFrame(
+            columns=["Datetime", "Open", "High", "Low", "Close", "Volume", "Ticker"]
+        )
+        start = datetime(2026, 3, 3).date()
+        end = datetime(2026, 3, 6).date()
+        result = self._apply_range_filter(empty, start, end)
+        assert result.empty
+
+    def test_rows_before_start_date_are_excluded(self):
+        """Rows before START_DATE are excluded."""
+        df = pd.DataFrame({
+            "Datetime": [
+                "2026-03-01 09:30:00",  # before start — excluded
+                "2026-03-02 09:30:00",  # before start — excluded
+                "2026-03-03 09:30:00",  # start date   — kept
+                "2026-03-04 09:30:00",  # within range — kept
+                "2026-03-06 09:30:00",  # end date     — kept
+            ],
+            "Close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "Ticker": ["BDO.PS"] * 5,
+        })
+        start = datetime(2026, 3, 3).date()
+        end = datetime(2026, 3, 6).date()
+        result = self._apply_range_filter(df, start, end)
+        assert len(result) == 3
+        assert all(result["Datetime"].dt.date >= start)
+        assert all(result["Datetime"].dt.date <= end)
+
+    def test_rows_after_end_date_are_excluded(self):
+        """Rows after END_DATE are excluded."""
+        df = pd.DataFrame({
+            "Datetime": [
+                "2026-03-03 09:30:00",  # start date   — kept
+                "2026-03-05 09:30:00",  # within range — kept
+                "2026-03-07 09:30:00",  # after end    — excluded
+                "2026-03-08 09:30:00",  # after end    — excluded
+            ],
+            "Close": [100.0, 101.0, 102.0, 103.0],
+            "Ticker": ["BDO.PS"] * 4,
+        })
+        start = datetime(2026, 3, 3).date()
+        end = datetime(2026, 3, 6).date()
+        result = self._apply_range_filter(df, start, end)
+        assert len(result) == 2
+        assert all(result["Datetime"].dt.date >= start)
+        assert all(result["Datetime"].dt.date <= end)
+
+    def test_start_and_end_dates_are_inclusive(self):
+        """Both START_DATE and END_DATE boundary rows must be retained."""
+        df = pd.DataFrame({
+            "Datetime": [
+                "2026-03-02 09:30:00",  # before — excluded
+                "2026-03-03 09:30:00",  # == start — kept
+                "2026-03-06 15:59:00",  # == end   — kept
+                "2026-03-07 09:30:00",  # after    — excluded
+            ],
+            "Close": [100.0, 101.0, 102.0, 103.0],
+            "Ticker": ["BDO.PS"] * 4,
+        })
+        start = datetime(2026, 3, 3).date()
+        end = datetime(2026, 3, 6).date()
+        result = self._apply_range_filter(df, start, end)
+        assert len(result) == 2
+        dates = result["Datetime"].dt.date.tolist()
+        assert datetime(2026, 3, 3).date() in dates
+        assert datetime(2026, 3, 6).date() in dates
+
+    def test_no_rows_in_range_returns_empty(self):
+        """Filter returns empty DataFrame when no candles fall in the date range."""
+        df = pd.DataFrame({
+            "Datetime": [
+                "2026-02-01 09:30:00",
+                "2026-04-01 09:30:00",
+            ],
+            "Close": [100.0, 101.0],
+            "Ticker": ["BDO.PS"] * 2,
+        })
+        start = datetime(2026, 3, 3).date()
+        end = datetime(2026, 3, 6).date()
+        result = self._apply_range_filter(df, start, end)
+        assert result.empty
+
+    def test_all_rows_in_range_are_kept(self):
+        """All rows are kept when the entire dataset falls within the date range."""
+        df = pd.DataFrame({
+            "Datetime": [
+                "2026-03-03 09:30:00",
+                "2026-03-04 09:30:00",
+                "2026-03-05 09:30:00",
+                "2026-03-06 09:30:00",
+            ],
+            "Close": [100.0, 101.0, 102.0, 103.0],
+            "Ticker": ["BDO.PS"] * 4,
+        })
+        start = datetime(2026, 3, 3).date()
+        end = datetime(2026, 3, 6).date()
+        result = self._apply_range_filter(df, start, end)
+        assert len(result) == 4
+
+    def test_problem_statement_example(self):
+        """
+        Mirrors the problem statement example:
+          CURRENT_DATE=20260303, Period=7d, END_DATE=20260306
+          => bot trades within 20260303 to 20260306 only.
+        """
+        df = pd.DataFrame({
+            "Datetime": [
+                "2026-02-24 09:30:00",  # 7 days before start — excluded
+                "2026-03-03 09:30:00",  # START_DATE          — kept
+                "2026-03-04 09:30:00",  # within range        — kept
+                "2026-03-05 09:30:00",  # within range        — kept
+                "2026-03-06 09:30:00",  # END_DATE            — kept
+                "2026-03-07 09:30:00",  # after END_DATE      — excluded
+            ],
+            "Close": [99.0, 100.0, 101.0, 102.0, 103.0, 104.0],
+            "Ticker": ["BDO.PS"] * 6,
+        })
+        start = datetime(2026, 3, 3).date()   # CURRENT_DATE in the example
+        end = datetime(2026, 3, 6).date()     # END_DATE in the example
+        result = self._apply_range_filter(df, start, end)
+        assert len(result) == 4
+        assert all(result["Datetime"].dt.date >= start)
+        assert all(result["Datetime"].dt.date <= end)
+
+
+# ---------------------------------------------------------------------------
 # validate_ticker tests
 # ---------------------------------------------------------------------------
 
