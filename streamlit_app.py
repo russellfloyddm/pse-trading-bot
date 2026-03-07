@@ -295,9 +295,13 @@ with st.sidebar:
                 "Slow EMA Period", 10, 100, config.EMA_SLOW,
                 help="Long look-back period for the slow EMA.",
             )
-            # Ensure fast < slow
+            # Ensure fast < slow; auto-clamp to avoid invalid configuration
             if sidebar_ema_fast >= sidebar_ema_slow:
-                st.warning("Fast EMA period must be less than Slow EMA period.")
+                st.warning(
+                    "Fast EMA period must be less than Slow EMA period. "
+                    "Slow EMA will be clamped to Fast EMA + 1."
+                )
+                sidebar_ema_slow = sidebar_ema_fast + 1
             sidebar_rsi_period = config.RSI_PERIOD
             sidebar_rsi_oversold = config.RSI_OVERSOLD
             sidebar_rsi_overbought = config.RSI_OVERBOUGHT
@@ -1271,12 +1275,13 @@ elif page == PAGES[8]:
 
     opt_col1, opt_col2, opt_col3 = st.columns(3)
 
+    _opt_strategy_keys = list(STRATEGY_PARAM_BOUNDS.keys())
     with opt_col1:
         opt_strategy = st.selectbox(
             "Strategy to Optimise",
-            list(STRATEGY_PARAM_BOUNDS.keys()),
-            index=list(STRATEGY_PARAM_BOUNDS.keys()).index(strategy_name)
-            if strategy_name in STRATEGY_PARAM_BOUNDS else 0,
+            _opt_strategy_keys,
+            index=_opt_strategy_keys.index(strategy_name)
+            if strategy_name in _opt_strategy_keys else 0,
             help="Select the strategy whose parameters will be optimised.",
         )
 
@@ -1399,17 +1404,28 @@ elif page == PAGES[8]:
     st.subheader("🔬 Parameter Comparison")
 
     bounds_map = {b.name: b for b in STRATEGY_PARAM_BOUNDS[result.strategy_name]}
+    # Parameters whose values represent percentages (stored as decimals)
+    _pct_params = {"max_position_pct", "stop_loss_pct", "take_profit_pct", "max_daily_loss_pct"}
     comparison_rows = []
     for name in result.initial_params:
         b = bounds_map.get(name)
         initial_val = result.initial_params[name]
         best_val = result.best_params[name]
-        fmt = "{:.0f}" if (b and b.is_int) else "{:.4f}"
+        if name in _pct_params:
+            fmt_val = lambda v: f"{v * 100:.2f}%"  # noqa: E731
+        elif b and b.is_int:
+            fmt_val = lambda v: f"{v:.0f}"  # noqa: E731
+        else:
+            fmt_val = lambda v: f"{v:.4f}"  # noqa: E731
         comparison_rows.append({
             "Parameter": name,
-            "Default Value": fmt.format(initial_val),
-            "Optimised Value": fmt.format(best_val),
-            "Range": f"[{b.min_val}, {b.max_val}]" if b else "—",
+            "Default Value": fmt_val(initial_val),
+            "Optimised Value": fmt_val(best_val),
+            "Range": (
+                f"[{b.min_val * 100:.1f}%, {b.max_val * 100:.1f}%]"
+                if name in _pct_params and b
+                else (f"[{b.min_val}, {b.max_val}]" if b else "—")
+            ),
             "Changed": "✅" if abs(best_val - initial_val) > 1e-9 else "—",
         })
     st.dataframe(

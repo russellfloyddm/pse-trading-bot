@@ -240,8 +240,9 @@ class StrategyOptimizer:
         )
 
         for i in range(1, self.n_iterations + 1):
-            # Perturbation scale decays linearly so early iterations
-            # explore broadly and later iterations refine the best region.
+            # Linear decay: starts at 2× base scale (broad early exploration) and
+            # falls to 0.5× base scale by the final iteration (fine-grained local
+            # refinement).  Formula: scale = base × (2.0 − 1.5 × i/n_iterations).
             scale = self.perturbation_scale * (2.0 - 1.5 * i / self.n_iterations)
 
             # Exploration: jump to a completely random point
@@ -320,8 +321,8 @@ class StrategyOptimizer:
             metrics = bt.run(df_ind)
             return float(metrics["total_return_pct"])
         except Exception as exc:  # pragma: no cover
-            logger.warning("Evaluation failed for params %s: %s", params, exc)
-            return -9999.0
+            logger.warning("Evaluation failed for params %s: %s", params, exc, exc_info=True)
+            return float("-inf")
 
     def _build_strategy(self, params: dict):
         """Construct the appropriate strategy instance from *params*."""
