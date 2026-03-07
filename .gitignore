@@ -33,7 +33,6 @@ ai_model/checkpoints/
 
 # Jupyter
 .ipynb_checkpoints/
-*.ipynb
 
 # IDE
 .vscode/
