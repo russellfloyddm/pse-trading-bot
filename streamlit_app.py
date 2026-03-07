@@ -33,6 +33,7 @@ import config
 import indicators
 import risk_management as rm
 from backtester import Backtester
+from data_pipeline import validate_ticker
 from portfolio import Portfolio
 from trading_agent import (
     STRATEGY_REGISTRY,
@@ -149,6 +150,9 @@ def _color_pnl(val: float) -> str:
 if "portfolio" not in st.session_state:
     st.session_state["portfolio"] = Portfolio(config.INITIAL_CAPITAL)
 
+if "custom_tickers" not in st.session_state:
+    st.session_state["custom_tickers"] = []
+
 # ---------------------------------------------------------------------------
 # Sidebar – navigation & global settings
 # ---------------------------------------------------------------------------
@@ -164,13 +168,37 @@ with st.sidebar:
     st.subheader("⚙️ Data Source")
     use_live = st.toggle("Use Live Yahoo Finance data", value=False)
 
+    # Build the full list of available tickers (defaults + user-added)
+    _all_tickers = list(dict.fromkeys(config.TICKERS + st.session_state["custom_tickers"]))
+    _default_selection = [t for t in config.TICKERS[:3] if t in _all_tickers]
+
     selected_tickers = st.multiselect(
         "Tickers",
-        config.TICKERS,
-        default=config.TICKERS[:3],
+        _all_tickers,
+        default=_default_selection,
     )
     if not selected_tickers:
-        selected_tickers = config.TICKERS[:2]
+        selected_tickers = _all_tickers[:2]
+
+    with st.expander("➕ Add Ticker"):
+        _new_ticker = st.text_input(
+            "Yahoo Finance symbol (e.g. BPI.PS, AAPL)",
+            placeholder="Enter ticker",
+            key="new_ticker_input",
+        ).strip().upper()
+        if st.button("Validate & Add", key="validate_add_btn"):
+            if not _new_ticker:
+                st.warning("Please enter a ticker symbol.")
+            elif _new_ticker in _all_tickers:
+                st.warning(f"**{_new_ticker}** is already in the list.")
+            else:
+                with st.spinner(f"Validating {_new_ticker} on Yahoo Finance…"):
+                    if validate_ticker(_new_ticker):
+                        st.session_state["custom_tickers"].append(_new_ticker)
+                        st.success(f"✅ **{_new_ticker}** added!")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ **{_new_ticker}** is not a valid Yahoo Finance ticker.")
 
     n_candles = st.slider(
         "Candles (synthetic)", 100, 500, 200, step=50,
@@ -255,7 +283,7 @@ if page == PAGES[0]:
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Initial Capital", _format_php(config.INITIAL_CAPITAL))
-    col2.metric("Tickers Loaded", len(config.TICKERS))
+    col2.metric("Tickers Available", len(_all_tickers))
     col3.metric("Data Interval", config.DATA_INTERVAL)
 
     st.divider()
@@ -287,13 +315,17 @@ if page == PAGES[0]:
 
     st.divider()
     st.subheader("Configured Tickers")
+    _default_names = {
+        "BDO.PS": "BDO Unibank, Inc.",
+        "SM.PS": "SM Investments Corporation",
+        "ALI.PS": "Ayala Land, Inc.",
+        "JFC.PS": "Jollibee Foods Corporation",
+        "AC.PS": "Ayala Corporation",
+        "TEL.PS": "PLDT, Inc.",
+    }
     ticker_data = [
-        {"Ticker": "BDO.PS", "Company": "BDO Unibank, Inc."},
-        {"Ticker": "SM.PS", "Company": "SM Investments Corporation"},
-        {"Ticker": "ALI.PS", "Company": "Ayala Land, Inc."},
-        {"Ticker": "JFC.PS", "Company": "Jollibee Foods Corporation"},
-        {"Ticker": "AC.PS", "Company": "Ayala Corporation"},
-        {"Ticker": "TEL.PS", "Company": "PLDT, Inc."},
+        {"Ticker": t, "Company": _default_names.get(t, t)}
+        for t in _all_tickers
     ]
     st.dataframe(pd.DataFrame(ticker_data), use_container_width=True, hide_index=True)
 

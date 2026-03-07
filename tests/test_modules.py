@@ -589,3 +589,44 @@ class TestLoadDataDateFilter:
         result = self._apply_backtest_filter(df, cutoff)
         assert len(result) == 2
         assert all(result["Datetime"].dt.date <= cutoff)
+
+
+# ---------------------------------------------------------------------------
+# validate_ticker tests
+# ---------------------------------------------------------------------------
+
+class TestValidateTicker:
+    """Tests for data_pipeline.validate_ticker() without a live network."""
+
+    def test_valid_ticker_returns_true(self):
+        """validate_ticker returns True when yfinance returns non-empty data."""
+        from unittest.mock import patch
+        from data_pipeline import validate_ticker
+
+        mock_df = pd.DataFrame({"Close": [100.0, 101.0]}, index=pd.date_range("2024-01-01", periods=2))
+        with patch("data_pipeline.yf.download", return_value=mock_df):
+            assert validate_ticker("BDO.PS") is True
+
+    def test_empty_response_returns_false(self):
+        """validate_ticker returns False when yfinance returns an empty DataFrame."""
+        from unittest.mock import patch
+        from data_pipeline import validate_ticker
+
+        with patch("data_pipeline.yf.download", return_value=pd.DataFrame()):
+            assert validate_ticker("INVALID.PS") is False
+
+    def test_none_response_returns_false(self):
+        """validate_ticker returns False when yfinance returns None."""
+        from unittest.mock import patch
+        from data_pipeline import validate_ticker
+
+        with patch("data_pipeline.yf.download", return_value=None):
+            assert validate_ticker("INVALID.PS") is False
+
+    def test_exception_returns_false(self):
+        """validate_ticker returns False when yfinance raises an exception."""
+        from unittest.mock import patch
+        from data_pipeline import validate_ticker
+
+        with patch("data_pipeline.yf.download", side_effect=Exception("Network error")):
+            assert validate_ticker("ERROR.PS") is False
