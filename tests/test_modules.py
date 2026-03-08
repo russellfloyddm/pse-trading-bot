@@ -1183,3 +1183,136 @@ class TestStrategyOptimizer:
             assert name in STRATEGY_PARAM_BOUNDS, (
                 f"Strategy '{name}' has no entry in STRATEGY_PARAM_BOUNDS"
             )
+
+
+# ---------------------------------------------------------------------------
+# DatabaseManager tests
+# ---------------------------------------------------------------------------
+
+class TestDatabaseManager:
+    """Tests for db.DatabaseManager (SQLite3 persistence layer)."""
+
+    def _make_portfolio(self) -> "Portfolio":
+        from portfolio import Portfolio
+        from datetime import datetime
+        p = Portfolio(initial_capital=100_000.0)
+        ts = datetime(2024, 1, 15, 9, 30)
+        p.buy("BDO.PS", shares=100, price=50.0, timestamp=ts)
+        p.sell("BDO.PS", shares=50, price=55.0, timestamp=ts)
+        return p
+
+    def test_save_and_load_portfolio_cash(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        p = self._make_portfolio()
+        db.save_portfolio(p)
+        loaded = db.load_portfolio()
+        assert loaded is not None
+        assert abs(loaded.cash - p.cash) < 1e-6
+        db.close()
+
+    def test_save_and_load_portfolio_initial_capital(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        p = self._make_portfolio()
+        db.save_portfolio(p)
+        loaded = db.load_portfolio()
+        assert loaded is not None
+        assert loaded.initial_capital == p.initial_capital
+        db.close()
+
+    def test_save_and_load_portfolio_positions(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        p = self._make_portfolio()
+        db.save_portfolio(p)
+        loaded = db.load_portfolio()
+        assert loaded is not None
+        assert set(loaded.positions.keys()) == set(p.positions.keys())
+        for ticker, pos in p.positions.items():
+            assert abs(loaded.positions[ticker].shares - pos.shares) < 1e-6
+            assert abs(loaded.positions[ticker].avg_cost - pos.avg_cost) < 1e-6
+        db.close()
+
+    def test_save_and_load_portfolio_trade_log(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        p = self._make_portfolio()
+        db.save_portfolio(p)
+        loaded = db.load_portfolio()
+        assert loaded is not None
+        assert len(loaded.trade_log) == len(p.trade_log)
+        for orig, restored in zip(p.trade_log, loaded.trade_log):
+            assert orig.action == restored.action
+            assert orig.ticker == restored.ticker
+            assert abs(orig.pnl - restored.pnl) < 1e-6
+        db.close()
+
+    def test_load_portfolio_returns_none_when_empty(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        assert db.load_portfolio() is None
+        db.close()
+
+    def test_save_overwrites_previous_state(self, tmp_path):
+        from db import DatabaseManager
+        from portfolio import Portfolio
+        from datetime import datetime
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        p1 = Portfolio(100_000.0)
+        db.save_portfolio(p1)
+        p2 = Portfolio(200_000.0)
+        p2.buy("SM.PS", shares=10, price=800.0, timestamp=datetime(2024, 1, 15, 9, 30))
+        db.save_portfolio(p2)
+        loaded = db.load_portfolio()
+        assert loaded is not None
+        assert loaded.initial_capital == 200_000.0
+        assert "SM.PS" in loaded.positions
+        db.close()
+
+    def test_save_and_load_custom_tickers(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        tickers = ["BPI.PS", "AAPL", "TSLA"]
+        db.save_custom_tickers(tickers)
+        loaded = db.load_custom_tickers()
+        assert set(loaded) == set(tickers)
+        db.close()
+
+    def test_load_custom_tickers_returns_empty_list_when_none(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        assert db.load_custom_tickers() == []
+        db.close()
+
+    def test_save_custom_tickers_overwrites_previous(self, tmp_path):
+        from db import DatabaseManager
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        db.save_custom_tickers(["OLD.PS"])
+        db.save_custom_tickers(["NEW.PS", "NEW2.PS"])
+        loaded = db.load_custom_tickers()
+        assert "OLD.PS" not in loaded
+        assert set(loaded) == {"NEW.PS", "NEW2.PS"}
+        db.close()
+
+    def test_daily_realized_pnl_persisted(self, tmp_path):
+        from db import DatabaseManager
+        from portfolio import Portfolio
+        from datetime import datetime
+        db = DatabaseManager(str(tmp_path / "test.db"))
+        p = Portfolio(50_000.0)
+        ts = datetime(2024, 1, 15, 9, 30)
+        p.buy("ALI.PS", shares=200, price=25.0, timestamp=ts)
+        p.sell("ALI.PS", shares=200, price=30.0, timestamp=ts)
+        db.save_portfolio(p)
+        loaded = db.load_portfolio()
+        assert loaded is not None
+        assert abs(loaded.daily_realized_pnl - p.daily_realized_pnl) < 1e-6
+        db.close()
+
+    def test_db_path_property(self, tmp_path):
+        from db import DatabaseManager
+        path = str(tmp_path / "mybot.db")
+        db = DatabaseManager(path)
+        assert db.db_path == path
+        db.close()
