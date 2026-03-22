@@ -170,6 +170,39 @@ if "portfolio" not in st.session_state:
 if "custom_tickers" not in st.session_state:
     st.session_state["custom_tickers"] = []
 
+# Configurable parameters – initialised from config defaults on first load.
+# All pages read from these session-state keys so that changes made on the
+# Dashboard (or via the sidebar) propagate to every subsequent simulation run.
+_PARAM_DEFAULTS: dict = {
+    "cfg_initial_capital": int(config.INITIAL_CAPITAL),
+    "cfg_max_position_pct": int(config.MAX_POSITION_PCT * 100),
+    "cfg_stop_loss_pct": int(config.STOP_LOSS_PCT * 100),
+    "cfg_take_profit_pct": int(config.TAKE_PROFIT_PCT * 100),
+    "cfg_max_daily_loss_pct": int(config.MAX_DAILY_LOSS_PCT * 100),
+    "cfg_ema_fast": config.EMA_FAST,
+    "cfg_ema_slow": config.EMA_SLOW,
+    "cfg_rsi_period": config.RSI_PERIOD,
+    "cfg_rsi_oversold": int(config.RSI_OVERSOLD),
+    "cfg_rsi_overbought": int(config.RSI_OVERBOUGHT),
+    "cfg_bollinger_period": config.BOLLINGER_PERIOD,
+    "cfg_bollinger_std": float(config.BOLLINGER_STD),
+}
+for _k, _v in _PARAM_DEFAULTS.items():
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+# Apply any pending Dashboard form updates BEFORE sidebar widgets are
+# instantiated.  Streamlit forbids modifying a session-state key that is
+# already bound to a widget in the same script run, so the Dashboard form
+# writes updates to temporary "pending_cfg_*" keys and we flush them here –
+# before any widget with key="cfg_*" is created.
+_pending_keys = [k for k in st.session_state if k.startswith("pending_cfg_")]
+for _pk in _pending_keys:
+    _real_key = _pk[len("pending_"):]   # "pending_cfg_x" → "cfg_x"
+    if _real_key.startswith("cfg_"):    # safety guard – only update known cfg_ keys
+        st.session_state[_real_key] = st.session_state[_pk]
+    del st.session_state[_pk]
+
 # ---------------------------------------------------------------------------
 # Sidebar – navigation & global settings
 # ---------------------------------------------------------------------------
@@ -259,28 +292,28 @@ with st.sidebar:
             "Initial Capital (PHP)",
             min_value=10_000,
             max_value=100_000_000,
-            value=int(config.INITIAL_CAPITAL),
             step=100_000,
+            key="cfg_initial_capital",
             help="Virtual starting capital used for all simulations and backtests.",
         )
         sidebar_max_position_pct = st.slider(
             "Max Position Size (%)", 1, 20,
-            int(config.MAX_POSITION_PCT * 100),
+            key="cfg_max_position_pct",
             help="Maximum fraction of capital deployed per trade.",
         ) / 100.0
         sidebar_stop_loss_pct = st.slider(
             "Stop-Loss (%)", 1, 15,
-            int(config.STOP_LOSS_PCT * 100),
+            key="cfg_stop_loss_pct",
             help="Sell position when price falls this % below entry.",
         ) / 100.0
         sidebar_take_profit_pct = st.slider(
             "Take-Profit (%)", 1, 25,
-            int(config.TAKE_PROFIT_PCT * 100),
+            key="cfg_take_profit_pct",
             help="Sell position when price rises this % above entry.",
         ) / 100.0
         sidebar_max_daily_loss_pct = st.slider(
             "Max Daily Loss (%)", 1, 15,
-            int(config.MAX_DAILY_LOSS_PCT * 100),
+            key="cfg_max_daily_loss_pct",
             help="Halt all trading if daily loss exceeds this % of initial capital.",
         ) / 100.0
 
@@ -288,11 +321,13 @@ with st.sidebar:
     with st.expander("📐 Strategy Parameters"):
         if strategy_name == "EMA Crossover":
             sidebar_ema_fast = st.slider(
-                "Fast EMA Period", 2, 20, config.EMA_FAST,
+                "Fast EMA Period", 2, 20,
+                key="cfg_ema_fast",
                 help="Short look-back period for the fast EMA.",
             )
             sidebar_ema_slow = st.slider(
-                "Slow EMA Period", 10, 100, config.EMA_SLOW,
+                "Slow EMA Period", 10, 100,
+                key="cfg_ema_slow",
                 help="Long look-back period for the slow EMA.",
             )
             # Ensure fast < slow; auto-clamp to avoid invalid configuration
@@ -302,42 +337,47 @@ with st.sidebar:
                     "Slow EMA will be clamped to Fast EMA + 1."
                 )
                 sidebar_ema_slow = sidebar_ema_fast + 1
-            sidebar_rsi_period = config.RSI_PERIOD
-            sidebar_rsi_oversold = config.RSI_OVERSOLD
-            sidebar_rsi_overbought = config.RSI_OVERBOUGHT
-            sidebar_bollinger_period = config.BOLLINGER_PERIOD
-            sidebar_bollinger_std = config.BOLLINGER_STD
+            sidebar_rsi_period = st.session_state["cfg_rsi_period"]
+            sidebar_rsi_oversold = st.session_state["cfg_rsi_oversold"]
+            sidebar_rsi_overbought = st.session_state["cfg_rsi_overbought"]
+            sidebar_bollinger_period = st.session_state["cfg_bollinger_period"]
+            sidebar_bollinger_std = st.session_state["cfg_bollinger_std"]
         elif strategy_name == "RSI Mean-Reversion":
             sidebar_rsi_period = st.slider(
-                "RSI Period", 5, 30, config.RSI_PERIOD,
+                "RSI Period", 5, 30,
+                key="cfg_rsi_period",
                 help="Look-back period for RSI calculation.",
             )
             sidebar_rsi_oversold = st.slider(
-                "RSI Oversold Threshold", 10, 45, int(config.RSI_OVERSOLD),
+                "RSI Oversold Threshold", 10, 45,
+                key="cfg_rsi_oversold",
                 help="RSI level considered oversold (BUY signal).",
             )
             sidebar_rsi_overbought = st.slider(
-                "RSI Overbought Threshold", 55, 90, int(config.RSI_OVERBOUGHT),
+                "RSI Overbought Threshold", 55, 90,
+                key="cfg_rsi_overbought",
                 help="RSI level considered overbought (SELL signal).",
             )
-            sidebar_ema_fast = config.EMA_FAST
-            sidebar_ema_slow = config.EMA_SLOW
-            sidebar_bollinger_period = config.BOLLINGER_PERIOD
-            sidebar_bollinger_std = config.BOLLINGER_STD
+            sidebar_ema_fast = st.session_state["cfg_ema_fast"]
+            sidebar_ema_slow = st.session_state["cfg_ema_slow"]
+            sidebar_bollinger_period = st.session_state["cfg_bollinger_period"]
+            sidebar_bollinger_std = st.session_state["cfg_bollinger_std"]
         else:  # Bollinger Bands
             sidebar_bollinger_period = st.slider(
-                "Bollinger Period", 5, 50, config.BOLLINGER_PERIOD,
+                "Bollinger Period", 5, 50,
+                key="cfg_bollinger_period",
                 help="Rolling window for Bollinger Bands.",
             )
             sidebar_bollinger_std = st.slider(
-                "Bollinger Std Dev", 1.0, 3.5, float(config.BOLLINGER_STD), step=0.1,
+                "Bollinger Std Dev", 1.0, 3.5,
+                key="cfg_bollinger_std", step=0.1,
                 help="Number of standard deviations for the band width.",
             )
-            sidebar_ema_fast = config.EMA_FAST
-            sidebar_ema_slow = config.EMA_SLOW
-            sidebar_rsi_period = config.RSI_PERIOD
-            sidebar_rsi_oversold = config.RSI_OVERSOLD
-            sidebar_rsi_overbought = config.RSI_OVERBOUGHT
+            sidebar_ema_fast = st.session_state["cfg_ema_fast"]
+            sidebar_ema_slow = st.session_state["cfg_ema_slow"]
+            sidebar_rsi_period = st.session_state["cfg_rsi_period"]
+            sidebar_rsi_oversold = st.session_state["cfg_rsi_oversold"]
+            sidebar_rsi_overbought = st.session_state["cfg_rsi_overbought"]
 
     st.divider()
 
@@ -465,30 +505,110 @@ if page == PAGES[0]:
 
     st.divider()
 
-    c1, c2 = st.columns(2)
+    st.subheader("⚙️ Configure Parameters")
+    st.markdown(
+        "Adjust Initial Capital and strategy/risk parameters below. "
+        "Click **💾 Apply Settings** to save — the new values will be used in all "
+        "future simulation, backtest, and signal-generation runs."
+    )
 
-    with c1:
-        st.subheader("Strategy Parameters")
-        params = {
-            "Fast EMA": sidebar_ema_fast,
-            "Slow EMA": sidebar_ema_slow,
-            "RSI Period": sidebar_rsi_period,
-            "RSI Overbought": sidebar_rsi_overbought,
-            "RSI Oversold": sidebar_rsi_oversold,
-            "Bollinger Period": sidebar_bollinger_period,
-            "Bollinger Std": sidebar_bollinger_std,
-        }
-        st.table(pd.DataFrame(params.items(), columns=["Parameter", "Value"]))
+    with st.form("dashboard_params_form"):
+        fc1, fc2 = st.columns(2)
 
-    with c2:
-        st.subheader("Risk Parameters")
-        risk_params = {
-            "Max Position %": f"{sidebar_max_position_pct * 100:.0f}%",
-            "Stop-Loss %": f"{sidebar_stop_loss_pct * 100:.0f}%",
-            "Take-Profit %": f"{sidebar_take_profit_pct * 100:.0f}%",
-            "Max Daily Loss %": f"{sidebar_max_daily_loss_pct * 100:.0f}%",
-        }
-        st.table(pd.DataFrame(risk_params.items(), columns=["Parameter", "Value"]))
+        with fc1:
+            st.markdown("**💰 Capital & Risk**")
+            d_initial_capital = st.number_input(
+                "Initial Capital (PHP)",
+                min_value=10_000,
+                max_value=100_000_000,
+                value=st.session_state["cfg_initial_capital"],
+                step=100_000,
+                help="Virtual starting capital for simulations and backtests.",
+            )
+            d_max_position_pct = st.slider(
+                "Max Position Size (%)", 1, 20,
+                value=st.session_state["cfg_max_position_pct"],
+                help="Maximum fraction of capital deployed per trade.",
+            )
+            d_stop_loss_pct = st.slider(
+                "Stop-Loss (%)", 1, 15,
+                value=st.session_state["cfg_stop_loss_pct"],
+                help="Sell position when price falls this % below entry.",
+            )
+            d_take_profit_pct = st.slider(
+                "Take-Profit (%)", 1, 25,
+                value=st.session_state["cfg_take_profit_pct"],
+                help="Sell position when price rises this % above entry.",
+            )
+            d_max_daily_loss_pct = st.slider(
+                "Max Daily Loss (%)", 1, 15,
+                value=st.session_state["cfg_max_daily_loss_pct"],
+                help="Halt trading if daily loss exceeds this % of initial capital.",
+            )
+
+        with fc2:
+            st.markdown("**📐 Strategy Parameters**")
+            d_ema_fast = st.slider(
+                "Fast EMA Period", 2, 20,
+                value=st.session_state["cfg_ema_fast"],
+                help="Short look-back period for the fast EMA.",
+            )
+            d_ema_slow = st.slider(
+                "Slow EMA Period", 10, 100,
+                value=st.session_state["cfg_ema_slow"],
+                help="Long look-back period for the slow EMA.",
+            )
+            d_rsi_period = st.slider(
+                "RSI Period", 5, 30,
+                value=st.session_state["cfg_rsi_period"],
+                help="Look-back period for RSI calculation.",
+            )
+            d_rsi_oversold = st.slider(
+                "RSI Oversold Threshold", 10, 45,
+                value=st.session_state["cfg_rsi_oversold"],
+                help="RSI level considered oversold (BUY signal).",
+            )
+            d_rsi_overbought = st.slider(
+                "RSI Overbought Threshold", 55, 90,
+                value=st.session_state["cfg_rsi_overbought"],
+                help="RSI level considered overbought (SELL signal).",
+            )
+            d_bollinger_period = st.slider(
+                "Bollinger Period", 5, 50,
+                value=st.session_state["cfg_bollinger_period"],
+                help="Rolling window for Bollinger Bands.",
+            )
+            d_bollinger_std = st.slider(
+                "Bollinger Std Dev", 1.0, 3.5,
+                value=st.session_state["cfg_bollinger_std"],
+                step=0.1,
+                help="Number of standard deviations for the band width.",
+            )
+
+        submitted = st.form_submit_button(
+            "💾 Apply Settings", type="primary", use_container_width=True
+        )
+        if submitted:
+            # Auto-clamp EMA slow to fast + 1 if invalid
+            if d_ema_fast >= d_ema_slow:
+                d_ema_slow = d_ema_fast + 1
+            # Write to "pending_cfg_*" keys so they can be applied at the
+            # very top of the next script run, BEFORE any widget with
+            # key="cfg_*" is instantiated (Streamlit forbids mutating a
+            # widget-bound session-state key in the same script run).
+            st.session_state["pending_cfg_initial_capital"] = d_initial_capital
+            st.session_state["pending_cfg_max_position_pct"] = d_max_position_pct
+            st.session_state["pending_cfg_stop_loss_pct"] = d_stop_loss_pct
+            st.session_state["pending_cfg_take_profit_pct"] = d_take_profit_pct
+            st.session_state["pending_cfg_max_daily_loss_pct"] = d_max_daily_loss_pct
+            st.session_state["pending_cfg_ema_fast"] = d_ema_fast
+            st.session_state["pending_cfg_ema_slow"] = d_ema_slow
+            st.session_state["pending_cfg_rsi_period"] = d_rsi_period
+            st.session_state["pending_cfg_rsi_oversold"] = d_rsi_oversold
+            st.session_state["pending_cfg_rsi_overbought"] = d_rsi_overbought
+            st.session_state["pending_cfg_bollinger_period"] = d_bollinger_period
+            st.session_state["pending_cfg_bollinger_std"] = d_bollinger_std
+            st.rerun()
 
     st.divider()
     st.subheader("Configured Tickers")

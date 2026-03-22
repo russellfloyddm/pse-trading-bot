@@ -39,3 +39,4 @@ ai_model/checkpoints/
 .idea/
 *.swp
 *.swo
+nohup.out
