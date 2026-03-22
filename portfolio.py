@@ -235,6 +235,14 @@ class Portfolio:
         """Reset the daily realized P&L counter (call at start of new day)."""
         self._daily_realized_pnl = 0.0
 
+    def set_daily_realized_pnl(self, value: float) -> None:
+        """Set the daily realized P&L counter (used when restoring persisted state).
+
+        Args:
+            value: The daily realized P&L value to restore.
+        """
+        self._daily_realized_pnl = value
+
     # ------------------------------------------------------------------
     # Reporting
     # ------------------------------------------------------------------

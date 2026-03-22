@@ -22,6 +22,7 @@ data/raw/*.csv
 data/raw/*.parquet
 data/processed/*.csv
 data/processed/*.parquet
+data/db/*.db
 reports/*.csv
 reports/*.parquet
 

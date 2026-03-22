@@ -34,6 +34,8 @@ import indicators
 import risk_management as rm
 from backtester import Backtester
 from data_pipeline import validate_ticker
+from db import DatabaseManager
+import gcs_sync
 from indicators import add_indicators_custom
 from optimizer import STRATEGY_PARAM_BOUNDS, StrategyOptimizer
 from portfolio import Portfolio
@@ -161,14 +163,29 @@ def _color_pnl(val: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Database initialisation (persists data across session resets)
+# ---------------------------------------------------------------------------
+
+if "db" not in st.session_state:
+    # On first run: try to pull the latest DB from GCS so state survives
+    # re-deployments and server restarts.
+    gcs_sync.download_db(config.DB_FILE)
+    st.session_state["db"] = DatabaseManager()
+
+_db: DatabaseManager = st.session_state["db"]
+
+# ---------------------------------------------------------------------------
 # Session state initialisation
 # ---------------------------------------------------------------------------
 
 if "portfolio" not in st.session_state:
-    st.session_state["portfolio"] = Portfolio(config.INITIAL_CAPITAL)
+    _saved_portfolio = _db.load_portfolio()
+    st.session_state["portfolio"] = (
+        _saved_portfolio if _saved_portfolio is not None else Portfolio(config.INITIAL_CAPITAL)
+    )
 
 if "custom_tickers" not in st.session_state:
-    st.session_state["custom_tickers"] = []
+    st.session_state["custom_tickers"] = _db.load_custom_tickers()
 
 # ---------------------------------------------------------------------------
 # Sidebar – navigation & global settings
@@ -212,6 +229,8 @@ with st.sidebar:
                 with st.spinner(f"Validating {_new_ticker} on Yahoo Finance…"):
                     if validate_ticker(_new_ticker):
                         st.session_state["custom_tickers"].append(_new_ticker)
+                        _db.save_custom_tickers(st.session_state["custom_tickers"])
+                        gcs_sync.upload_db(_db.db_path)
                         st.success(f"✅ **{_new_ticker}** added!")
                         st.rerun()
                     else:
@@ -360,6 +379,8 @@ with st.sidebar:
     st.divider()
     if st.button("🔄 Reset Portfolio", use_container_width=True):
         st.session_state["portfolio"] = Portfolio(sidebar_initial_capital)
+        _db.save_portfolio(st.session_state["portfolio"])
+        gcs_sync.upload_db(_db.db_path)
         st.success("Portfolio reset.")
 
 
@@ -563,6 +584,11 @@ elif page == PAGES[1]:
         st.session_state["sim_equity"] = eq_points
         st.session_state["sim_strategy"] = strategy_name
         st.session_state["sim_date"] = f"{start_date} → {end_date}" if is_backtest else "live"
+        # Persist simulation portfolio so results survive a session reset.
+        # Also sync to the main portfolio key so the Portfolio page reflects it.
+        st.session_state["portfolio"] = portfolio
+        _db.save_portfolio(portfolio)
+        gcs_sync.upload_db(_db.db_path)
         st.success("Simulation complete!")
 
     # ---- Results ----
@@ -901,6 +927,10 @@ elif page == PAGES[4]:
         st.session_state["signals_df"] = signals_df
         st.session_state["signal_portfolio"] = portfolio
         st.session_state["signals_strategy"] = strategy_name
+        # Keep main portfolio in sync so the Portfolio page and DB reflect it.
+        st.session_state["portfolio"] = portfolio
+        _db.save_portfolio(portfolio)
+        gcs_sync.upload_db(_db.db_path)
         st.success(f"Signals generated using **{strategy_name}**!")
 
     signals_df = st.session_state.get("signals_df")

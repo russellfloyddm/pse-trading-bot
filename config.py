@@ -48,6 +48,16 @@ TRADE_LOG_FILE = os.path.join(REPORTS_DIR, "trade_log.csv")
 PORTFOLIO_LOG_FILE = os.path.join(REPORTS_DIR, "portfolio_log.csv")
 BACKTEST_REPORT_FILE = os.path.join(REPORTS_DIR, "backtest_report.csv")
 
+# SQLite database (persists portfolio state and custom tickers across sessions)
+DB_DIR = os.path.join(DATA_DIR, "db")
+DB_FILE = os.path.join(DB_DIR, "trading_bot.db")
+
+# ---------------------------------------------------------------------------
+# Google Cloud Storage (optional – set GCS_BUCKET_NAME to enable)
+# ---------------------------------------------------------------------------
+GCS_BUCKET_NAME: str = os.environ.get("GCS_BUCKET_NAME", "")
+GCS_DB_BLOB_NAME: str = os.environ.get("GCS_DB_BLOB_NAME", "pse_trading_bot.db")
+
 # ---------------------------------------------------------------------------
 # Virtual portfolio settings
 # ---------------------------------------------------------------------------
